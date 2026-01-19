@@ -15,6 +15,7 @@ This proxy solves the debugging problem by:
 4. This only works if the client trusts our Certificate Authority (CA)
 
 NEW: Web-based monitor on port 4040 shows all intercepted traffic in real-time!
+Protocol: HTTP/1.1 only (no HTTP/2 support)
 */
 
 import (
@@ -110,13 +111,11 @@ type LogModule interface {
 	ProcessResponse(resp *http.Response) error
 }
 
-// RegisterModule adds a logging module to the chain
 func RegisterModule(module LogModule) {
 	logModules = append(logModules, module)
 	log.Printf("[MODULE] Registered: %s", module.Name())
 }
 
-// Module execution helpers
 func executeModules(req *http.Request) bool {
 	shouldLog := false
 	for _, module := range logModules {
@@ -139,7 +138,6 @@ func executeModulesResponse(resp *http.Response) error {
 	return nil
 }
 
-// EditThisCookie export format
 type EditThisCookieExport struct {
 	Domain         string  `json:"domain"`
 	ExpirationDate float64 `json:"expirationDate"`
@@ -167,19 +165,16 @@ func exportResponseCookies(resp *http.Response) {
 	filename := "EditThisCookie_Sessions.json"
 	var exportData []EditThisCookieExport
 
-	// Read existing data if file exists
 	if data, err := os.ReadFile(filename); err == nil {
 		json.Unmarshal(data, &exportData)
 	}
 
-	// Create map for deduplication (key: name+domain)
 	cookieMap := make(map[string]EditThisCookieExport)
 	for _, existing := range exportData {
 		key := existing.Name + "|" + existing.Domain
 		cookieMap[key] = existing
 	}
 
-	// Convert Set-Cookie response cookies to EditThisCookie format
 	for _, cookie := range setCookies {
 		sameSite := "unspecified"
 		switch cookie.SameSite {
@@ -230,7 +225,6 @@ func exportResponseCookies(resp *http.Response) {
 		cookieMap[key] = etcCookie
 	}
 
-	// Convert map back to array
 	exportData = make([]EditThisCookieExport, 0, len(cookieMap))
 	for _, cookie := range cookieMap {
 		exportData = append(exportData, cookie)
@@ -296,9 +290,6 @@ func isBinaryContent(data []byte) bool {
 	return nullCount > sampleSize/10 || controlCount > sampleSize*3/10
 }
 
-// ==================== MONITORING MODULE ====================
-
-// TrafficEntry represents a captured HTTP request/response
 type TrafficEntry struct {
 	ID              int
 	Timestamp       time.Time
@@ -318,7 +309,6 @@ type TrafficEntry struct {
 	ClientAddr      string
 }
 
-// TrafficStore holds all captured traffic with thread-safe access
 type TrafficStore struct {
 	sync.RWMutex
 	entries    []TrafficEntry
@@ -377,7 +367,6 @@ func (ts *TrafficStore) Clear() {
 	ts.entries = make([]TrafficEntry, 0)
 }
 
-// MonitoringModule captures traffic for the web interface
 type MonitoringModule struct {
 	captureRequestBodies  bool
 	captureResponseBodies bool
@@ -424,7 +413,6 @@ func (m *MonitoringModule) ProcessResponse(resp *http.Response) error {
 	if m.captureResponseBodies && resp.Body != nil {
 		encoding := resp.Header.Get("Content-Encoding")
 
-		// Skip unsupported compressions
 		if encoding == "br" || encoding == "zstd" || encoding == "deflate" {
 			entry.ResponseBody = fmt.Sprintf("[Content compressed with %s - cannot display]", encoding)
 			entry.Duration = time.Since(startTime)
@@ -481,8 +469,6 @@ func cloneHeaders(h http.Header) map[string][]string {
 	}
 	return clone
 }
-
-// ==================== MONITOR WEB SERVER ====================
 
 func StartMonitorServer(port int) {
 	http.HandleFunc("/", handleIndex)
@@ -841,7 +827,6 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             color: #333;
         }
         
-        /* JSON Syntax Highlighting */
         .json-key {
             color: #9cdcfe;
         }
@@ -1044,7 +1029,6 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         function formatResponseBody(body, contentType) {
             if (!body) return '<div style="color: #999;">No response body</div>';
             
-            // Detect content type
             const isJSON = contentType && (contentType.includes('application/json') || contentType.includes('application/javascript'));
             const isHTML = contentType && contentType.includes('text/html');
             const isXML = contentType && contentType.includes('xml');
@@ -1277,8 +1261,6 @@ func countByHost(entries []TrafficEntry) []map[string]interface{} {
 
 	return result
 }
-
-// ==================== BUILT-IN LOGGING MODULES ====================
 
 type AllTrafficModule struct{}
 
@@ -1638,8 +1620,6 @@ func (m *ForceGzipModule) ProcessResponse(resp *http.Response) error {
 	return nil
 }
 
-// ==================== MAIN FUNCTION ====================
-
 func main() {
 	port := flag.Int("port", 8080, "Proxy port")
 	cleanup := flag.Bool("cleanup", false, "Remove CA certificates and exit")
@@ -1679,7 +1659,6 @@ func main() {
 
 	initializeModules()
 
-	// Start monitoring web interface
 	StartMonitorServer(*monitorPort)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", config.Port))
@@ -1697,7 +1676,6 @@ func main() {
 		log.Printf("⚠️  Cookie Export: Sessions will be exported to EditThisCookie_Sessions.json")
 		log.Printf("WARNING: This file contains sensitive authentication data!")
 
-		// Test write permissions
 		testFile := "EditThisCookie_Sessions.json"
 		testData := []EditThisCookieExport{}
 		if jsonData, err := json.MarshalIndent(testData, "", "    "); err == nil {
@@ -1724,57 +1702,9 @@ func main() {
 func initializeModules() {
 	log.Println("Initializing logging modules...")
 
-	// Register monitoring module FIRST to capture all traffic
-	// Default: Log all traffic
 	RegisterModule(&AllTrafficModule{})
-
-	// IMPORTANT: Register ForceGzip to prevent br/deflate compression
-
-	// TODO : add br module
 	RegisterModule(&ForceGzipModule{})
-
-	// Connect to host 4040 to see traffic in browser
-
 	RegisterModule(NewMonitoringModule())
-
-	// Uncomment to enable OAuth-only logging:
-	// RegisterModule(&OAuthModule{})
-
-	// Uncomment to filter by domain:
-	// RegisterModule(&DomainFilterModule{
-	// 	Domains: []string{"example.com", "api.example.com"},
-	// })
-
-	// Uncomment to filter by path:
-	// RegisterModule(&PathFilterModule{
-	// 	Paths: []string{"/api/", "/v1/"},
-	// })
-
-	// Uncomment to modify requests:
-	// RegisterModule(&RequestModifierModule{
-	// 	AddHeaders: map[string]string{
-	// 		"X-Proxy-Debug": "true",
-	// 	},
-	// 	RemoveHeaders: []string{"User-Agent"},
-	// })
-
-	// Uncomment to modify responses:
-	// RegisterModule(&ResponseModifierModule{
-	// 	AddHeaders: map[string]string{
-	// 		"X-Proxy-Modified": "true",
-	// 	},
-	// 	RemoveHeaders: []string{"Server"},
-	// })
-
-	// Uncomment to replace strings:
-	// RegisterModule(&ForceGzipModule{})
-	// RegisterModule(&StringReplacementModule{
-	// 	Replacements: map[string]string{
-	// 		"cyber":    "kitten",
-	// 		"hacker":   "cat lover",
-	// 		"security": "cuddles",
-	// 	},
-	// })
 
 	log.Printf("Total modules registered: %d", len(logModules))
 }
@@ -2063,6 +1993,12 @@ func handleConnection(clientConn net.Conn, config *ProxyConfig) {
 		return
 	}
 
+	if req.Method == "PRI" {
+		log.Printf("[REJECT] Invalid request method PRI from %s", clientAddr)
+		clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\nInvalid request method.\r\n"))
+		return
+	}
+
 	if req.Method == http.MethodConnect {
 		log.Printf("[CONNECT] %s -> %s", clientAddr, req.Host)
 		handleConnect(clientConn, req, config)
@@ -2085,23 +2021,41 @@ func handleConnect(clientConn net.Conn, req *http.Request, config *ProxyConfig) 
 		Certificates: []tls.Certificate{*cert},
 		MinVersion:   tls.VersionTLS12,
 		MaxVersion:   tls.VersionTLS13,
+
 		CipherSuites: []uint16{
 			tls.TLS_AES_128_GCM_SHA256,
-			tls.TLS_AES_256_GCM_SHA384,
 			tls.TLS_CHACHA20_POLY1305_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_AES_256_GCM_SHA384,
+
 			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 		},
+
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+			tls.CurveP384,
+		},
+
 		PreferServerCipherSuites: false,
 	}
 
 	tlsClientConn := tls.Server(clientConn, tlsConfig)
 	if err := tlsClientConn.Handshake(); err != nil {
-		log.Printf("TLS handshake failed: %v", err)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "tls: client offered only unsupported versions") {
+			log.Printf("[TLS] Client using unsupported TLS version for %s", host)
+		} else if strings.Contains(errMsg, "first record does not look like a TLS handshake") {
+			log.Printf("[TLS] Client sent non-TLS data to %s (possibly plain HTTP)", host)
+		} else if strings.Contains(errMsg, "remote error") || strings.Contains(errMsg, "EOF") {
+			log.Printf("[TLS] Client aborted handshake with %s", host)
+		} else {
+			log.Printf("[TLS] Handshake failed with %s: %v", host, err)
+		}
 		return
 	}
 	defer tlsClientConn.Close()
@@ -2120,9 +2074,23 @@ func handleConnect(clientConn net.Conn, req *http.Request, config *ProxyConfig) 
 	for {
 		req, err := http.ReadRequest(reader)
 		if err != nil {
-			if err != io.EOF {
-				log.Printf("Failed to read HTTPS request: %v", err)
+			if err == io.EOF {
+				return
 			}
+			
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "use of closed network connection") ||
+			   strings.Contains(errMsg, "connection reset") ||
+			   strings.Contains(errMsg, "broken pipe") {
+				return
+			}
+			
+			if strings.Contains(errMsg, "malformed HTTP") {
+				log.Printf("[TLS] Client %s sent non-HTTP data (likely clean close): %v", host, err)
+				return
+			}
+			
+			log.Printf("[TLS] Error reading HTTPS request from %s: %v", host, err)
 			return
 		}
 
@@ -2138,13 +2106,15 @@ func handleConnect(clientConn net.Conn, req *http.Request, config *ProxyConfig) 
 			return
 		}
 
-		// Export response cookies if verbose mode
 		if verboseMode {
 			exportResponseCookies(resp)
 		}
 
 		if err := resp.Write(tlsClientConn); err != nil {
-			log.Printf("Failed to write response: %v", err)
+			if err != io.EOF && !strings.Contains(err.Error(), "broken pipe") {
+				log.Printf("Failed to write response: %v", err)
+			}
+			resp.Body.Close()
 			return
 		}
 		resp.Body.Close()
@@ -2155,6 +2125,11 @@ func handleHTTP(clientConn net.Conn, req *http.Request, config *ProxyConfig) {
 	defer clientConn.Close()
 
 	if !req.URL.IsAbs() {
+		if req.Host == "" {
+			log.Printf("[ERROR] Invalid HTTP request: no host specified")
+			clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\nNo host specified in request\r\n"))
+			return
+		}
 		req.URL.Scheme = "http"
 		req.URL.Host = req.Host
 	}
@@ -2169,7 +2144,6 @@ func handleHTTP(clientConn net.Conn, req *http.Request, config *ProxyConfig) {
 	}
 	defer resp.Body.Close()
 
-	// Export response cookies if verbose mode
 	if verboseMode {
 		exportResponseCookies(resp)
 	}
@@ -2181,22 +2155,31 @@ func forwardRequest(req *http.Request) (*http.Response, error) {
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		MaxVersion: tls.VersionTLS13,
+
 		CipherSuites: []uint16{
 			tls.TLS_AES_128_GCM_SHA256,
-			tls.TLS_AES_256_GCM_SHA384,
 			tls.TLS_CHACHA20_POLY1305_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_AES_256_GCM_SHA384,
+
 			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		},
+
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+			tls.CurveP384,
 		},
 	}
 
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
 		Proxy:           http.ProxyFromEnvironment,
+		ForceAttemptHTTP2: false,
 	}
 
 	client := &http.Client{
@@ -2239,7 +2222,13 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	logEntry := fmt.Sprintf("\n=== %s ===\n", timestamp)
-	logEntry = logEntry + fmt.Sprintf("%s %s\n", req.Method, req.URL.String())
+	
+	reqURL := req.URL.String()
+	if reqURL == "" || reqURL == "*" {
+		reqURL = fmt.Sprintf("%s (malformed)", req.RequestURI)
+	}
+	
+	logEntry = logEntry + fmt.Sprintf("%s %s\n", req.Method, reqURL)
 
 	logEntry = logEntry + "Headers:\n"
 	for name, values := range req.Header {
@@ -2248,7 +2237,7 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 		}
 	}
 
-	if req.Method == http.MethodPost || req.Method == http.MethodPut {
+	if req.Method == http.MethodPost || req.Method == http.MethodPut || req.Method == http.MethodPatch {
 		bodyBytes, err := io.ReadAll(req.Body)
 		if err == nil {
 			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
@@ -2278,13 +2267,11 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 		}
 	}
 
-	// Print to console only if verbose mode is enabled
 	if verboseMode {
 		consoleEntry := sanitizeForConsole(logEntry)
 		fmt.Print(consoleEntry)
 	}
 
-	// Always write to log file
 	logWriter.WriteString(logEntry)
 }
 
