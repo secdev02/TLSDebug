@@ -1301,8 +1301,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         
         .detail-section {
             margin-bottom: 25px;
-            overflow-x: auto;
             max-width: 100%;
+            position: relative;
         }
         
         .detail-section h3 {
@@ -1312,6 +1312,34 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .section-copy-btn {
+            padding: 4px 10px;
+            background: #fff;
+            border: 1px solid #d0d0d0;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            color: #666;
+            text-transform: none;
+            letter-spacing: normal;
+            font-weight: normal;
+            transition: all 0.2s;
+        }
+        
+        .section-copy-btn:hover {
+            background: #e8e8e8;
+            border-color: #999;
+        }
+        
+        .section-copy-btn.copied {
+            background: #4caf50;
+            color: white;
+            border-color: #4caf50;
         }
         
         #modalBody {
@@ -1320,23 +1348,33 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         }
         
         .detail-grid {
-            display: grid;
-            grid-template-columns: 150px 1fr;
-            gap: 10px;
             background: #fafafa;
-            padding: 15px;
             border-radius: 4px;
             border: 1px solid #e0e0e0;
             max-width: 100%;
             width: 100%;
             box-sizing: border-box;
+            overflow: hidden;
+        }
+        
+        .detail-grid > div {
+            padding: 12px 15px;
+            border-bottom: 1px solid #e0e0e0;
+            display: grid;
+            grid-template-columns: 150px 1fr;
+            gap: 15px;
+            align-items: start;
+        }
+        
+        .detail-grid > div:last-child,
+        .detail-grid > div:nth-last-child(2):nth-child(odd) {
+            border-bottom: none;
         }
         
         .detail-grid .label {
             color: #666;
             font-weight: 600;
             font-size: 12px;
-            align-self: start;
             padding-top: 2px;
         }
         
@@ -1353,36 +1391,48 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         
         .headers-list {
             background: #fafafa;
-            padding: 15px;
+            padding: 0;
             border-radius: 4px;
             border: 1px solid #e0e0e0;
-            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
-            font-size: 12px;
             max-width: 100%;
             width: 100%;
             box-sizing: border-box;
+            overflow: hidden;
         }
         
         .header-item {
-            margin-bottom: 6px;
-            padding-bottom: 6px;
+            margin: 0;
+            padding: 12px 15px;
             border-bottom: 1px solid #e0e0e0;
-            word-break: break-word;
-            overflow-wrap: anywhere;
-            display: block;
+            background: #fafafa;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            position: relative;
+        }
+        
+        .header-item:hover {
+            background: #f0f0f0;
         }
         
         .header-item:last-child {
             border-bottom: none;
-            margin-bottom: 0;
-            padding-bottom: 0;
+        }
+        
+        .header-content {
+            flex: 1;
+            min-width: 0;
+            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+            font-size: 12px;
+            word-break: break-word;
+            overflow-wrap: anywhere;
         }
         
         .header-name {
             color: #1976d2;
             font-weight: 600;
-            word-break: break-word;
-            display: inline;
+            display: block;
+            margin-bottom: 4px;
         }
         
         .header-value {
@@ -1390,7 +1440,36 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             word-break: break-word;
             overflow-wrap: anywhere;
             white-space: pre-wrap;
-            display: inline;
+            display: block;
+            line-height: 1.5;
+        }
+        
+        .copy-btn {
+            padding: 4px 8px;
+            background: #fff;
+            border: 1px solid #d0d0d0;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            color: #666;
+            white-space: nowrap;
+            flex-shrink: 0;
+            transition: all 0.2s;
+        }
+        
+        .copy-btn:hover {
+            background: #e8e8e8;
+            border-color: #999;
+        }
+        
+        .copy-btn:active {
+            background: #d0d0d0;
+        }
+        
+        .copy-btn.copied {
+            background: #4caf50;
+            color: white;
+            border-color: #4caf50;
         }
         
         .body-content {
@@ -1409,6 +1488,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             overflow-wrap: anywhere;
             color: #d4d4d4;
             max-width: 100%;
+            width: 100%;
+            box-sizing: border-box;
         }
         
         .body-content.json {
@@ -1471,22 +1552,30 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
                 gap: 15px;
             }
             
-            .detail-grid {
+            .detail-grid > div {
                 grid-template-columns: 1fr;
+                gap: 5px;
             }
             
             .detail-grid .label {
                 font-weight: 700;
-                margin-top: 10px;
-            }
-            
-            .detail-grid .label:first-child {
-                margin-top: 0;
+                padding-top: 0;
             }
             
             .modal-content {
                 margin: 10px;
                 padding: 20px;
+                width: calc(100vw - 20px);
+            }
+            
+            .header-item {
+                flex-direction: column;
+                gap: 8px;
+            }
+            
+            .copy-btn,
+            .section-copy-btn {
+                align-self: flex-start;
             }
         }
     </style>
@@ -1702,29 +1791,29 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
                 
                 const modalBody = document.getElementById('modalBody');
                 let html = '<div class="detail-section"><h3>Request Information</h3><div class="detail-grid">';
-                html += '<div class="label">Method:</div><div class="value"><span class="method ' + entry.Method + '">' + entry.Method + '</span></div>';
-                html += '<div class="label">URL:</div><div class="value">' + escapeHtml(entry.URL) + '</div>';
-                html += '<div class="label">Host:</div><div class="value">' + escapeHtml(entry.Host) + '</div>';
-                html += '<div class="label">Path:</div><div class="value">' + escapeHtml(entry.Path) + '</div>';
-                html += '<div class="label">Timestamp:</div><div class="value">' + new Date(entry.Timestamp).toLocaleString() + '</div>';
+                html += '<div><div class="label">Method:</div><div class="value"><span class="method ' + entry.Method + '">' + entry.Method + '</span></div></div>';
+                html += '<div><div class="label">URL:</div><div class="value">' + escapeHtml(entry.URL) + '</div></div>';
+                html += '<div><div class="label">Host:</div><div class="value">' + escapeHtml(entry.Host) + '</div></div>';
+                html += '<div><div class="label">Path:</div><div class="value">' + escapeHtml(entry.Path) + '</div></div>';
+                html += '<div><div class="label">Timestamp:</div><div class="value">' + new Date(entry.Timestamp).toLocaleString() + '</div></div>';
                 html += '</div></div>';
                 
                 if (entry.StatusCode) {
                     html += '<div class="detail-section"><h3>Response Information</h3><div class="detail-grid">';
-                    html += '<div class="label">Status:</div><div class="value"><span class="status ' + getStatusClass(entry.StatusCode) + '">' + entry.StatusCode + ' ' + escapeHtml(entry.StatusText) + '</span></div>';
-                    html += '<div class="label">Content-Type:</div><div class="value">' + escapeHtml(entry.ContentType || 'N/A') + '</div>';
-                    html += '<div class="label">Duration:</div><div class="value">' + (entry.Duration ? (entry.Duration / 1000000).toFixed(2) + 'ms' : 'N/A') + '</div>';
+                    html += '<div><div class="label">Status:</div><div class="value"><span class="status ' + getStatusClass(entry.StatusCode) + '">' + entry.StatusCode + ' ' + escapeHtml(entry.StatusText) + '</span></div></div>';
+                    html += '<div><div class="label">Content-Type:</div><div class="value">' + escapeHtml(entry.ContentType || 'N/A') + '</div></div>';
+                    html += '<div><div class="label">Duration:</div><div class="value">' + (entry.Duration ? (entry.Duration / 1000000).toFixed(2) + 'ms' : 'N/A') + '</div></div>';
                     html += '</div></div>';
                 }
                 
-                html += '<div class="detail-section"><h3>Request Headers</h3><div class="headers-list">' + formatHeaders(entry.RequestHeaders) + '</div></div>';
+                html += '<div class="detail-section"><h3>Request Headers <button class="section-copy-btn" onclick="copyAllHeaders(' + id + ', \'request\', this)">Copy All</button></h3><div class="headers-list" id="req-headers-' + id + '">' + formatHeaders(entry.RequestHeaders) + '</div></div>';
                 
                 if (entry.ResponseHeaders) {
-                    html += '<div class="detail-section"><h3>Response Headers</h3><div class="headers-list">' + formatHeaders(entry.ResponseHeaders) + '</div></div>';
+                    html += '<div class="detail-section"><h3>Response Headers <button class="section-copy-btn" onclick="copyAllHeaders(' + id + ', \'response\', this)">Copy All</button></h3><div class="headers-list" id="resp-headers-' + id + '">' + formatHeaders(entry.ResponseHeaders) + '</div></div>';
                 }
                 
                 if (entry.ResponseBody) {
-                    html += '<div class="detail-section"><h3>Response Body</h3>' + formatResponseBody(entry.ResponseBody, entry.ContentType) + '</div>';
+                    html += '<div class="detail-section"><h3>Response Body <button class="section-copy-btn" onclick="copyResponseBody(' + id + ', this)">Copy</button></h3><div id="resp-body-' + id + '">' + formatResponseBody(entry.ResponseBody, entry.ContentType) + '</div></div>';
                 }
                 
                 modalBody.innerHTML = html;
@@ -1735,13 +1824,86 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             }
         }
         
+        function copyAllHeaders(entryId, type, button) {
+            const headersDiv = document.getElementById(type + '-headers-' + entryId);
+            if (!headersDiv) return;
+            
+            const headers = [];
+            headersDiv.querySelectorAll('.header-item').forEach(item => {
+                const name = item.querySelector('.header-name').textContent;
+                const value = item.querySelector('.header-value').textContent;
+                headers.push(name + ' ' + value);
+            });
+            
+            const text = headers.join('\n');
+            navigator.clipboard.writeText(text).then(() => {
+                button.textContent = '✓ Copied';
+                button.classList.add('copied');
+                setTimeout(() => {
+                    button.textContent = 'Copy All';
+                    button.classList.remove('copied');
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+            });
+        }
+        
+        function copyResponseBody(entryId, button) {
+            const bodyDiv = document.getElementById('resp-body-' + entryId);
+            if (!bodyDiv) return;
+            
+            const bodyContent = bodyDiv.querySelector('.body-content');
+            const text = bodyContent ? bodyContent.textContent : bodyDiv.textContent;
+            
+            navigator.clipboard.writeText(text).then(() => {
+                button.textContent = '✓ Copied';
+                button.classList.add('copied');
+                setTimeout(() => {
+                    button.textContent = 'Copy';
+                    button.classList.remove('copied');
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+            });
+        }
+        
         function formatHeaders(headers) {
             if (!headers) return '<div style="color: #999;">No headers</div>';
             
             return Object.entries(headers).map(([name, values]) => {
                 const valueStr = Array.isArray(values) ? values.join(', ') : values;
-                return '<div class="header-item"><span class="header-name">' + escapeHtml(name) + ':</span> <span class="header-value">' + escapeHtml(valueStr) + '</span></div>';
+                const headerId = 'header-' + Math.random().toString(36).substr(2, 9);
+                return `<div class="header-item">
+                    <div class="header-content">
+                        <span class="header-name">${escapeHtml(name)}</span>
+                        <span class="header-value" id="${headerId}">${escapeHtml(valueStr)}</span>
+                    </div>
+                    <button class="copy-btn" onclick="copyHeaderValue('${headerId}', this); event.stopPropagation();">Copy</button>
+                </div>`;
             }).join('');
+        }
+        
+        function copyHeaderValue(elementId, button) {
+            const element = document.getElementById(elementId);
+            if (!element) return;
+            
+            const text = element.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = button.textContent;
+                button.textContent = '✓ Copied';
+                button.classList.add('copied');
+                
+                setTimeout(() => {
+                    button.textContent = originalText;
+                    button.classList.remove('copied');
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+                button.textContent = '✗ Failed';
+                setTimeout(() => {
+                    button.textContent = 'Copy';
+                }, 2000);
+            });
         }
         
         function closeModal(event) {
