@@ -365,6 +365,10 @@ GOOS=darwin GOARCH=amd64 go build -o tlsproxy-mac tlsproxy.go
 
 # macOS (Apple Silicon)
 GOOS=darwin GOARCH=arm64 go build -o tlsproxy-mac-arm tlsproxy.go
+
+# Smaller Build
+
+go build -ldflags "-s -w"
 ```
 
 ## Files
