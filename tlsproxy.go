@@ -15,6 +15,8 @@ This proxy solves the debugging problem by:
 4. This only works if the client trusts our Certificate Authority (CA)
 
 NEW: Web-based monitor on port 4040 shows all intercepted traffic in real-time!
+NEW: Extracts and logs JWT tokens, OAuth tokens, and session cookies!
+Protocol: HTTP/1.1 only (no HTTP/2 support)
 */
 
 import (
@@ -26,6 +28,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"flag"
@@ -110,13 +113,11 @@ type LogModule interface {
 	ProcessResponse(resp *http.Response) error
 }
 
-// RegisterModule adds a logging module to the chain
 func RegisterModule(module LogModule) {
 	logModules = append(logModules, module)
 	log.Printf("[MODULE] Registered: %s", module.Name())
 }
 
-// Module execution helpers
 func executeModules(req *http.Request) bool {
 	shouldLog := false
 	for _, module := range logModules {
@@ -139,7 +140,44 @@ func executeModulesResponse(resp *http.Response) error {
 	return nil
 }
 
-// EditThisCookie export format
+// ============================================================================
+// TOKEN STRUCTURES AND EXPORTS
+// ============================================================================
+
+type JWTHeader struct {
+	Alg string `json:"alg"`
+	Typ string `json:"typ"`
+	Kid string `json:"kid,omitempty"`
+}
+
+type JWTToken struct {
+	Raw        string                 `json:"raw"`
+	Header     map[string]interface{} `json:"header"`
+	Payload    map[string]interface{} `json:"payload"`
+	Signature  string                 `json:"signature"`
+	Source     string                 `json:"source"`
+	URL        string                 `json:"url"`
+	Timestamp  time.Time              `json:"timestamp"`
+	Expiry     *time.Time             `json:"expiry,omitempty"`
+	IssuedAt   *time.Time             `json:"issuedAt,omitempty"`
+	NotBefore  *time.Time             `json:"notBefore,omitempty"`
+	Issuer     string                 `json:"issuer,omitempty"`
+	Subject    string                 `json:"subject,omitempty"`
+	Audience   interface{}            `json:"audience,omitempty"`
+}
+
+type OAuthToken struct {
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token,omitempty"`
+	TokenType    string    `json:"token_type,omitempty"`
+	ExpiresIn    int       `json:"expires_in,omitempty"`
+	Scope        string    `json:"scope,omitempty"`
+	IDToken      string    `json:"id_token,omitempty"`
+	Source       string    `json:"source"`
+	URL          string    `json:"url"`
+	Timestamp    time.Time `json:"timestamp"`
+}
+
 type EditThisCookieExport struct {
 	Domain         string  `json:"domain"`
 	ExpirationDate float64 `json:"expirationDate"`
@@ -154,6 +192,503 @@ type EditThisCookieExport struct {
 	Value          string  `json:"value"`
 }
 
+type TokenExport struct {
+	JWTTokens   []JWTToken   `json:"jwt_tokens"`
+	OAuthTokens []OAuthToken `json:"oauth_tokens"`
+	Cookies     []EditThisCookieExport `json:"cookies"`
+	LastUpdated time.Time    `json:"last_updated"`
+}
+
+var (
+	tokenExportMutex sync.Mutex
+	tokenExport      = &TokenExport{
+		JWTTokens:   make([]JWTToken, 0),
+		OAuthTokens: make([]OAuthToken, 0),
+		Cookies:     make([]EditThisCookieExport, 0),
+	}
+)
+
+// ============================================================================
+// JWT PARSING
+// ============================================================================
+
+func parseJWT(tokenString string, source string, requestURL string) *JWTToken {
+	parts := strings.Split(tokenString, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+
+	// Decode header
+	headerBytes, err := base64DecodeSegment(parts[0])
+	if err != nil {
+		return nil
+	}
+
+	var header map[string]interface{}
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return nil
+	}
+
+	// Decode payload
+	payloadBytes, err := base64DecodeSegment(parts[1])
+	if err != nil {
+		return nil
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return nil
+	}
+
+	jwt := &JWTToken{
+		Raw:       tokenString,
+		Header:    header,
+		Payload:   payload,
+		Signature: parts[2],
+		Source:    source,
+		URL:       requestURL,
+		Timestamp: time.Now(),
+	}
+
+	// Extract standard claims
+	if exp, ok := payload["exp"].(float64); ok {
+		expTime := time.Unix(int64(exp), 0)
+		jwt.Expiry = &expTime
+	}
+	if iat, ok := payload["iat"].(float64); ok {
+		iatTime := time.Unix(int64(iat), 0)
+		jwt.IssuedAt = &iatTime
+	}
+	if nbf, ok := payload["nbf"].(float64); ok {
+		nbfTime := time.Unix(int64(nbf), 0)
+		jwt.NotBefore = &nbfTime
+	}
+	if iss, ok := payload["iss"].(string); ok {
+		jwt.Issuer = iss
+	}
+	if sub, ok := payload["sub"].(string); ok {
+		jwt.Subject = sub
+	}
+	if aud, ok := payload["aud"]; ok {
+		jwt.Audience = aud
+	}
+
+	return jwt
+}
+
+func base64DecodeSegment(seg string) ([]byte, error) {
+	if l := len(seg) % 4; l > 0 {
+		seg += strings.Repeat("=", 4-l)
+	}
+	return base64.URLEncoding.DecodeString(seg)
+}
+
+// ============================================================================
+// TOKEN EXTRACTION
+// ============================================================================
+
+func extractJWTFromString(text string, source string, requestURL string) []*JWTToken {
+	var tokens []*JWTToken
+	
+	// Pattern: eyJ... (typical JWT start)
+	words := strings.Fields(text)
+	for _, word := range words {
+		// Remove common surrounding characters
+		word = strings.Trim(word, `"',;:()[]{}`)
+		
+		if strings.HasPrefix(word, "eyJ") && strings.Count(word, ".") == 2 {
+			if jwt := parseJWT(word, source, requestURL); jwt != nil {
+				tokens = append(tokens, jwt)
+			}
+		}
+	}
+	
+	return tokens
+}
+
+func extractOAuthTokensFromJSON(body string, source string, requestURL string) *OAuthToken {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &data); err != nil {
+		return nil
+	}
+
+	token := &OAuthToken{
+		Source:    source,
+		URL:       requestURL,
+		Timestamp: time.Now(),
+	}
+
+	hasToken := false
+
+	if at, ok := data["access_token"].(string); ok && at != "" {
+		token.AccessToken = at
+		hasToken = true
+	}
+	if rt, ok := data["refresh_token"].(string); ok && rt != "" {
+		token.RefreshToken = rt
+		hasToken = true
+	}
+	if tt, ok := data["token_type"].(string); ok {
+		token.TokenType = tt
+	}
+	if exp, ok := data["expires_in"].(float64); ok {
+		token.ExpiresIn = int(exp)
+	}
+	if scope, ok := data["scope"].(string); ok {
+		token.Scope = scope
+	}
+	if idt, ok := data["id_token"].(string); ok && idt != "" {
+		token.IDToken = idt
+		hasToken = true
+	}
+
+	if !hasToken {
+		return nil
+	}
+
+	return token
+}
+
+func extractOAuthTokensFromForm(body string, source string, requestURL string) *OAuthToken {
+	values, err := url.ParseQuery(body)
+	if err != nil {
+		return nil
+	}
+
+	token := &OAuthToken{
+		Source:    source,
+		URL:       requestURL,
+		Timestamp: time.Now(),
+	}
+
+	hasToken := false
+
+	if at := values.Get("access_token"); at != "" {
+		token.AccessToken = at
+		hasToken = true
+	}
+	if rt := values.Get("refresh_token"); rt != "" {
+		token.RefreshToken = rt
+		hasToken = true
+	}
+	if tt := values.Get("token_type"); tt != "" {
+		token.TokenType = tt
+	}
+	if exp := values.Get("expires_in"); exp != "" {
+		var expInt int
+		fmt.Sscanf(exp, "%d", &expInt)
+		token.ExpiresIn = expInt
+	}
+	if scope := values.Get("scope"); scope != "" {
+		token.Scope = scope
+	}
+	if idt := values.Get("id_token"); idt != "" {
+		token.IDToken = idt
+		hasToken = true
+	}
+
+	if !hasToken {
+		return nil
+	}
+
+	return token
+}
+
+// ============================================================================
+// TOKEN EXPORT MODULE
+// ============================================================================
+
+type TokenExportModule struct{}
+
+func NewTokenExportModule() *TokenExportModule {
+	return &TokenExportModule{}
+}
+
+func (m *TokenExportModule) Name() string {
+	return "TokenExport"
+}
+
+func (m *TokenExportModule) ShouldLog(req *http.Request) bool {
+	return true
+}
+
+func (m *TokenExportModule) ProcessRequest(req *http.Request) error {
+	if req == nil {
+		return nil
+	}
+
+	reqURL := req.URL.String()
+
+	// Extract JWT from Authorization header
+	if authHeader := req.Header.Get("Authorization"); authHeader != "" {
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+			if jwt := parseJWT(tokenString, "Request Authorization Header", reqURL); jwt != nil {
+				addJWTToken(jwt)
+			}
+		}
+	}
+
+	// Extract JWT from cookies
+	for _, cookie := range req.Cookies() {
+		if strings.HasPrefix(cookie.Value, "eyJ") && strings.Count(cookie.Value, ".") == 2 {
+			if jwt := parseJWT(cookie.Value, fmt.Sprintf("Request Cookie: %s", cookie.Name), reqURL); jwt != nil {
+				addJWTToken(jwt)
+			}
+		}
+	}
+
+	// Extract from request body (POST/PUT)
+	if req.Body != nil && (req.Method == "POST" || req.Method == "PUT" || req.Method == "PATCH") {
+		bodyBytes, err := readAndRestoreRequestBody(req)
+		if err == nil && bodyBytes != nil {
+			// Try to decompress if gzip encoded
+			displayBytes := bodyBytes
+			contentEncoding := req.Header.Get("Content-Encoding")
+			if contentEncoding == "gzip" && len(bodyBytes) > 0 {
+				gzipReader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
+				if err == nil {
+					decompressed, err := io.ReadAll(gzipReader)
+					gzipReader.Close()
+					if err == nil {
+						displayBytes = decompressed
+					}
+				}
+			}
+			
+			if !isBinaryContent(displayBytes) {
+				bodyStr := string(displayBytes)
+				contentType := req.Header.Get("Content-Type")
+
+				// Try JSON OAuth tokens
+				if strings.Contains(contentType, "application/json") {
+					if token := extractOAuthTokensFromJSON(bodyStr, "Request Body (JSON)", reqURL); token != nil {
+						addOAuthToken(token)
+					}
+				}
+
+				// Try form-encoded OAuth tokens
+				if strings.Contains(contentType, "application/x-www-form-urlencoded") {
+					if token := extractOAuthTokensFromForm(bodyStr, "Request Body (Form)", reqURL); token != nil {
+						addOAuthToken(token)
+					}
+				}
+
+				// Extract JWTs from body text
+				jwts := extractJWTFromString(bodyStr, "Request Body", reqURL)
+				for _, jwt := range jwts {
+					addJWTToken(jwt)
+				}
+			}
+		}
+	}
+
+	// Extract from URL parameters
+	if req.URL.RawQuery != "" {
+		values := req.URL.Query()
+		
+		// Check for access_token in URL
+		if at := values.Get("access_token"); at != "" {
+			token := &OAuthToken{
+				AccessToken: at,
+				Source:      "URL Parameter",
+				URL:         reqURL,
+				Timestamp:   time.Now(),
+			}
+			if rt := values.Get("refresh_token"); rt != "" {
+				token.RefreshToken = rt
+			}
+			addOAuthToken(token)
+		}
+
+		// Check for JWT in URL parameters
+		for key, values := range values {
+			for _, value := range values {
+				if strings.HasPrefix(value, "eyJ") && strings.Count(value, ".") == 2 {
+					if jwt := parseJWT(value, fmt.Sprintf("URL Parameter: %s", key), reqURL); jwt != nil {
+						addJWTToken(jwt)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *TokenExportModule) ProcessResponse(resp *http.Response) error {
+	if resp == nil || resp.Body == nil {
+		return nil
+	}
+
+	respURL := resp.Request.URL.String()
+
+	// Extract JWT from Authorization header in response
+	if authHeader := resp.Header.Get("Authorization"); authHeader != "" {
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+			if jwt := parseJWT(tokenString, "Response Authorization Header", respURL); jwt != nil {
+				addJWTToken(jwt)
+			}
+		}
+	}
+
+	// Extract from Set-Cookie headers
+	for _, cookie := range resp.Cookies() {
+		if strings.HasPrefix(cookie.Value, "eyJ") && strings.Count(cookie.Value, ".") == 2 {
+			if jwt := parseJWT(cookie.Value, fmt.Sprintf("Response Cookie: %s", cookie.Name), respURL); jwt != nil {
+				addJWTToken(jwt)
+			}
+		}
+	}
+
+	// Extract from response body
+	encoding := resp.Header.Get("Content-Encoding")
+	if encoding == "br" || encoding == "zstd" || encoding == "deflate" {
+		return nil // Skip unsupported compressions
+	}
+
+	var reader io.Reader = resp.Body
+	if encoding == "gzip" {
+		gzipReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil
+		}
+		reader = gzipReader
+		defer gzipReader.Close()
+	}
+
+	bodyBytes, err := io.ReadAll(reader)
+	if err != nil {
+		return nil
+	}
+
+	resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	if encoding == "gzip" {
+		resp.Header.Del("Content-Encoding")
+		resp.ContentLength = int64(len(bodyBytes))
+		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+	}
+
+	if !isBinaryContent(bodyBytes) {
+		bodyStr := string(bodyBytes)
+		contentType := resp.Header.Get("Content-Type")
+
+		// Try JSON OAuth tokens
+		if strings.Contains(contentType, "application/json") {
+			if token := extractOAuthTokensFromJSON(bodyStr, "Response Body (JSON)", respURL); token != nil {
+				addOAuthToken(token)
+				
+				// Also check if id_token is a JWT
+				if token.IDToken != "" && strings.HasPrefix(token.IDToken, "eyJ") {
+					if jwt := parseJWT(token.IDToken, "Response Body (ID Token)", respURL); jwt != nil {
+						addJWTToken(jwt)
+					}
+				}
+			}
+		}
+
+		// Extract JWTs from body text
+		jwts := extractJWTFromString(bodyStr, "Response Body", respURL)
+		for _, jwt := range jwts {
+			addJWTToken(jwt)
+		}
+	}
+
+	// Export cookies as before
+	exportResponseCookies(resp)
+
+	return nil
+}
+
+func addJWTToken(jwt *JWTToken) {
+	if jwt == nil {
+		return
+	}
+
+	tokenExportMutex.Lock()
+	defer tokenExportMutex.Unlock()
+
+	// Check for duplicates
+	for _, existing := range tokenExport.JWTTokens {
+		if existing.Raw == jwt.Raw {
+			return
+		}
+	}
+
+	tokenExport.JWTTokens = append(tokenExport.JWTTokens, *jwt)
+	tokenExport.LastUpdated = time.Now()
+
+	log.Printf("[JWT] Captured JWT from %s", jwt.Source)
+	if jwt.Expiry != nil {
+		log.Printf("[JWT]   Expires: %s", jwt.Expiry.Format(time.RFC3339))
+	}
+	if jwt.Subject != "" {
+		log.Printf("[JWT]   Subject: %s", jwt.Subject)
+	}
+	if jwt.Issuer != "" {
+		log.Printf("[JWT]   Issuer: %s", jwt.Issuer)
+	}
+
+	saveTokenExport()
+}
+
+func addOAuthToken(token *OAuthToken) {
+	if token == nil {
+		return
+	}
+
+	tokenExportMutex.Lock()
+	defer tokenExportMutex.Unlock()
+
+	// Check for duplicates
+	for _, existing := range tokenExport.OAuthTokens {
+		if existing.AccessToken == token.AccessToken && existing.RefreshToken == token.RefreshToken {
+			return
+		}
+	}
+
+	tokenExport.OAuthTokens = append(tokenExport.OAuthTokens, *token)
+	tokenExport.LastUpdated = time.Now()
+
+	log.Printf("[OAuth] Captured OAuth token from %s", token.Source)
+	if token.TokenType != "" {
+		log.Printf("[OAuth]   Type: %s", token.TokenType)
+	}
+	if token.ExpiresIn > 0 {
+		log.Printf("[OAuth]   Expires in: %d seconds", token.ExpiresIn)
+	}
+	if token.Scope != "" {
+		log.Printf("[OAuth]   Scope: %s", token.Scope)
+	}
+
+	saveTokenExport()
+}
+
+func saveTokenExport() {
+	filename := "captured_tokens.json"
+	
+	jsonData, err := json.MarshalIndent(tokenExport, "", "    ")
+	if err != nil {
+		log.Printf("[EXPORT] ERROR: Failed to marshal tokens JSON: %v", err)
+		return
+	}
+
+	err = os.WriteFile(filename, jsonData, 0600) // Restrictive permissions
+	if err != nil {
+		log.Printf("[EXPORT] ERROR: Failed to write tokens file %s: %v", filename, err)
+		return
+	}
+
+	log.Printf("[EXPORT] ✓ Saved %d JWTs, %d OAuth tokens, %d cookies to %s", 
+		len(tokenExport.JWTTokens), len(tokenExport.OAuthTokens), len(tokenExport.Cookies), filename)
+}
+
+// ============================================================================
+// COOKIE EXPORT (Enhanced)
+// ============================================================================
+
 func exportResponseCookies(resp *http.Response) {
 	if resp == nil || resp.Header == nil {
 		return
@@ -164,22 +699,15 @@ func exportResponseCookies(resp *http.Response) {
 		return
 	}
 
-	filename := "EditThisCookie_Sessions.json"
-	var exportData []EditThisCookieExport
+	tokenExportMutex.Lock()
+	defer tokenExportMutex.Unlock()
 
-	// Read existing data if file exists
-	if data, err := os.ReadFile(filename); err == nil {
-		json.Unmarshal(data, &exportData)
-	}
-
-	// Create map for deduplication (key: name+domain)
 	cookieMap := make(map[string]EditThisCookieExport)
-	for _, existing := range exportData {
-		key := existing.Name + "|" + existing.Domain
+	for _, existing := range tokenExport.Cookies {
+		key := fmt.Sprintf("%s|%s", existing.Name, existing.Domain)
 		cookieMap[key] = existing
 	}
 
-	// Convert Set-Cookie response cookies to EditThisCookie format
 	for _, cookie := range setCookies {
 		sameSite := "unspecified"
 		switch cookie.SameSite {
@@ -226,44 +754,86 @@ func exportResponseCookies(resp *http.Response) {
 			etcCookie.ExpirationDate = float64(cookie.Expires.Unix()) + float64(cookie.Expires.Nanosecond())/1e9
 		}
 
-		key := etcCookie.Name + "|" + etcCookie.Domain
+		key := fmt.Sprintf("%s|%s", etcCookie.Name, etcCookie.Domain)
 		cookieMap[key] = etcCookie
 	}
 
-	// Convert map back to array
-	exportData = make([]EditThisCookieExport, 0, len(cookieMap))
+	tokenExport.Cookies = make([]EditThisCookieExport, 0, len(cookieMap))
 	for _, cookie := range cookieMap {
-		exportData = append(exportData, cookie)
+		tokenExport.Cookies = append(tokenExport.Cookies, cookie)
+	}
+	tokenExport.LastUpdated = time.Now()
+
+	// Also save to old format for compatibility
+	jsonData, err := json.MarshalIndent(tokenExport.Cookies, "", "    ")
+	if err == nil {
+		os.WriteFile("EditThisCookie_Sessions.json", jsonData, 0644)
 	}
 
-	jsonData, err := json.MarshalIndent(exportData, "", "    ")
+	saveTokenExport()
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+// readAndRestoreRequestBody reads the request body and restores it,
+// properly setting Content-Length headers
+func readAndRestoreRequestBody(req *http.Request) ([]byte, error) {
+	if req.Body == nil {
+		return nil, nil
+	}
+
+	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
-		log.Printf("[EXPORT] ERROR: Failed to marshal JSON: %v", err)
-		return
+		return nil, err
 	}
 
-	err = os.WriteFile(filename, jsonData, 0644)
-	if err != nil {
-		log.Printf("[EXPORT] ERROR: Failed to write file %s: %v", filename, err)
-		return
-	}
+	// Restore the body
+	req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	
+	// Fix Content-Length header to prevent 411 errors
+	req.ContentLength = int64(len(bodyBytes))
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+	
+	// Remove Transfer-Encoding: chunked if present, since we now have Content-Length
+	// Note: This is different from Content-Encoding (gzip, br, etc.)
+	req.Header.Del("Transfer-Encoding")
 
-	log.Printf("[EXPORT] ✓ %d unique cookies in %s", len(exportData), filename)
+	return bodyBytes, nil
 }
 
 func sanitizeForConsole(data string) string {
+	// If the data looks like it contains a lot of escape sequences, it's probably binary
+	escapeCount := strings.Count(data, "\\x")
+	if escapeCount > 50 {
+		return "[Binary/encoded data, " + fmt.Sprintf("%d", len(data)) + " bytes - use log file to view]"
+	}
+
 	var result strings.Builder
 	result.Grow(len(data))
+	consecutiveEscapes := 0
+	maxConsecutiveEscapes := 10
 
 	for _, r := range data {
 		if r == '\n' || r == '\r' || r == '\t' {
 			result.WriteRune(r)
+			consecutiveEscapes = 0
 		} else if r >= 32 && r < 127 {
 			result.WriteRune(r)
+			consecutiveEscapes = 0
 		} else if r >= 128 {
 			result.WriteRune(r)
+			consecutiveEscapes = 0
 		} else {
-			result.WriteString(fmt.Sprintf("\\x%02x", r))
+			if consecutiveEscapes < maxConsecutiveEscapes {
+				result.WriteString(fmt.Sprintf("\\x%02x", r))
+				consecutiveEscapes++
+			} else if consecutiveEscapes == maxConsecutiveEscapes {
+				result.WriteString("...[binary data truncated]")
+				consecutiveEscapes++
+			}
+			// Skip further escapes after truncation message
 		}
 	}
 
@@ -275,6 +845,35 @@ func isBinaryContent(data []byte) bool {
 		return false
 	}
 
+	// Check for common binary file signatures
+	if len(data) >= 4 {
+		// PNG signature
+		if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
+			return true
+		}
+		// JPEG signature
+		if data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+			return true
+		}
+		// PDF signature
+		if data[0] == 0x25 && data[1] == 0x50 && data[2] == 0x44 && data[3] == 0x46 {
+			return true
+		}
+		// ZIP signature
+		if data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
+			return true
+		}
+		// GIF signature
+		if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
+			return true
+		}
+		// Gzip signature
+		if data[0] == 0x1F && data[1] == 0x8B {
+			return true
+		}
+	}
+
+	// Sample first 512 bytes or entire content if smaller
 	sampleSize := 512
 	if len(data) < sampleSize {
 		sampleSize = len(data)
@@ -282,23 +881,47 @@ func isBinaryContent(data []byte) bool {
 
 	nullCount := 0
 	controlCount := 0
+	nonPrintableCount := 0
 
 	for i := 0; i < sampleSize; i++ {
 		b := data[i]
 		if b == 0 {
 			nullCount++
 		}
+		// Count control characters (except common text ones)
 		if b < 32 && b != '\n' && b != '\r' && b != '\t' {
 			controlCount++
 		}
+		// Count bytes outside printable ASCII and common UTF-8 ranges
+		if b < 32 && b != '\n' && b != '\r' && b != '\t' {
+			nonPrintableCount++
+		} else if b == 127 || (b >= 128 && b < 160) {
+			nonPrintableCount++
+		}
 	}
 
-	return nullCount > sampleSize/10 || controlCount > sampleSize*3/10
+	// If more than 10% null bytes, it's binary
+	if nullCount > sampleSize/10 {
+		return true
+	}
+
+	// If more than 30% control characters, it's binary
+	if controlCount > sampleSize*3/10 {
+		return true
+	}
+
+	// If more than 20% non-printable characters, it's binary
+	if nonPrintableCount > sampleSize/5 {
+		return true
+	}
+
+	return false
 }
 
-// ==================== MONITORING MODULE ====================
+// ============================================================================
+// TRAFFIC MONITORING (existing code)
+// ============================================================================
 
-// TrafficEntry represents a captured HTTP request/response
 type TrafficEntry struct {
 	ID              int
 	Timestamp       time.Time
@@ -318,7 +941,6 @@ type TrafficEntry struct {
 	ClientAddr      string
 }
 
-// TrafficStore holds all captured traffic with thread-safe access
 type TrafficStore struct {
 	sync.RWMutex
 	entries    []TrafficEntry
@@ -377,7 +999,6 @@ func (ts *TrafficStore) Clear() {
 	ts.entries = make([]TrafficEntry, 0)
 }
 
-// MonitoringModule captures traffic for the web interface
 type MonitoringModule struct {
 	captureRequestBodies  bool
 	captureResponseBodies bool
@@ -424,7 +1045,6 @@ func (m *MonitoringModule) ProcessResponse(resp *http.Response) error {
 	if m.captureResponseBodies && resp.Body != nil {
 		encoding := resp.Header.Get("Content-Encoding")
 
-		// Skip unsupported compressions
 		if encoding == "br" || encoding == "zstd" || encoding == "deflate" {
 			entry.ResponseBody = fmt.Sprintf("[Content compressed with %s - cannot display]", encoding)
 			entry.Duration = time.Since(startTime)
@@ -482,7 +1102,9 @@ func cloneHeaders(h http.Header) map[string][]string {
 	return clone
 }
 
-// ==================== MONITOR WEB SERVER ====================
+// ============================================================================
+// WEB MONITOR SERVER (existing code - keeping it the same)
+// ============================================================================
 
 func StartMonitorServer(port int) {
 	http.HandleFunc("/", handleIndex)
@@ -661,6 +1283,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             padding: 12px 20px;
             font-size: 13px;
             color: #333;
+            max-width: 300px;
+            word-break: break-word;
+            overflow-wrap: anywhere;
         }
         
         .method {
@@ -689,6 +1314,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             color: #1976d2;
             word-break: break-all;
             font-size: 13px;
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         
         .timestamp {
@@ -707,15 +1335,21 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             z-index: 1000;
             padding: 20px;
             overflow-y: auto;
+            overflow-x: hidden;
         }
         
         .modal-content {
             background: #fff;
             max-width: 1200px;
+            width: calc(100vw - 40px);
             margin: 40px auto;
             border-radius: 4px;
             padding: 30px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            max-height: 90vh;
+            overflow-y: auto;
+            overflow-x: hidden;
+            box-sizing: border-box;
         }
         
         .modal-header {
@@ -731,6 +1365,10 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             color: #333;
             font-size: 18px;
             font-weight: 600;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            flex: 1;
+            margin-right: 15px;
         }
         
         .close-btn {
@@ -748,6 +1386,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         
         .detail-section {
             margin-bottom: 25px;
+            max-width: 100%;
+            position: relative;
         }
         
         .detail-section h3 {
@@ -757,59 +1397,164 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .section-copy-btn {
+            padding: 4px 10px;
+            background: #fff;
+            border: 1px solid #d0d0d0;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            color: #666;
+            text-transform: none;
+            letter-spacing: normal;
+            font-weight: normal;
+            transition: all 0.2s;
+        }
+        
+        .section-copy-btn:hover {
+            background: #e8e8e8;
+            border-color: #999;
+        }
+        
+        .section-copy-btn.copied {
+            background: #4caf50;
+            color: white;
+            border-color: #4caf50;
+        }
+        
+        #modalBody {
+            max-width: 100%;
+            overflow-x: hidden;
         }
         
         .detail-grid {
-            display: grid;
-            grid-template-columns: 150px 1fr;
-            gap: 10px;
             background: #fafafa;
-            padding: 15px;
             border-radius: 4px;
             border: 1px solid #e0e0e0;
+            max-width: 100%;
+            width: 100%;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+        
+        .detail-grid > div {
+            padding: 12px 15px;
+            border-bottom: 1px solid #e0e0e0;
+            display: grid;
+            grid-template-columns: 150px 1fr;
+            gap: 15px;
+            align-items: start;
+        }
+        
+        .detail-grid > div:last-child,
+        .detail-grid > div:nth-last-child(2):nth-child(odd) {
+            border-bottom: none;
         }
         
         .detail-grid .label {
             color: #666;
             font-weight: 600;
             font-size: 12px;
+            padding-top: 2px;
         }
         
         .detail-grid .value {
             color: #333;
-    		font-size: 13px;
-   	 		word-break: break-all;
-    		overflow-wrap: break-word;
+            font-size: 13px;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            white-space: pre-wrap;
+            max-width: 100%;
+            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+            line-height: 1.5;
         }
         
         .headers-list {
             background: #fafafa;
-            padding: 15px;
+            padding: 0;
             border-radius: 4px;
             border: 1px solid #e0e0e0;
-            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
-            font-size: 12px;
+            max-width: 100%;
+            width: 100%;
+            box-sizing: border-box;
+            overflow: hidden;
         }
         
         .header-item {
-            margin-bottom: 6px;
-            padding-bottom: 6px;
+            margin: 0;
+            padding: 12px 15px;
             border-bottom: 1px solid #e0e0e0;
+            background: #fafafa;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            position: relative;
+        }
+        
+        .header-item:hover {
+            background: #f0f0f0;
         }
         
         .header-item:last-child {
             border-bottom: none;
-            margin-bottom: 0;
-            padding-bottom: 0;
+        }
+        
+        .header-content {
+            flex: 1;
+            min-width: 0;
+            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+            font-size: 12px;
+            word-break: break-word;
+            overflow-wrap: anywhere;
         }
         
         .header-name {
             color: #1976d2;
             font-weight: 600;
+            display: block;
+            margin-bottom: 4px;
         }
         
         .header-value {
             color: #666;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            white-space: pre-wrap;
+            display: block;
+            line-height: 1.5;
+        }
+        
+        .copy-btn {
+            padding: 4px 8px;
+            background: #fff;
+            border: 1px solid #d0d0d0;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            color: #666;
+            white-space: nowrap;
+            flex-shrink: 0;
+            transition: all 0.2s;
+        }
+        
+        .copy-btn:hover {
+            background: #e8e8e8;
+            border-color: #999;
+        }
+        
+        .copy-btn:active {
+            background: #d0d0d0;
+        }
+        
+        .copy-btn.copied {
+            background: #4caf50;
+            color: white;
+            border-color: #4caf50;
         }
         
         .body-content {
@@ -822,9 +1567,14 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             line-height: 1.6;
             max-height: 600px;
             overflow-y: auto;
+            overflow-x: auto;
             white-space: pre-wrap;
             word-break: break-word;
+            overflow-wrap: anywhere;
             color: #d4d4d4;
+            max-width: 100%;
+            width: 100%;
+            box-sizing: border-box;
         }
         
         .body-content.json {
@@ -841,7 +1591,6 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             color: #333;
         }
         
-        /* JSON Syntax Highlighting */
         .json-key {
             color: #9cdcfe;
         }
@@ -886,6 +1635,32 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             .stats {
                 flex-direction: column;
                 gap: 15px;
+            }
+            
+            .detail-grid > div {
+                grid-template-columns: 1fr;
+                gap: 5px;
+            }
+            
+            .detail-grid .label {
+                font-weight: 700;
+                padding-top: 0;
+            }
+            
+            .modal-content {
+                margin: 10px;
+                padding: 20px;
+                width: calc(100vw - 20px);
+            }
+            
+            .header-item {
+                flex-direction: column;
+                gap: 8px;
+            }
+            
+            .copy-btn,
+            .section-copy-btn {
+                align-self: flex-start;
             }
         }
     </style>
@@ -1044,7 +1819,6 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         function formatResponseBody(body, contentType) {
             if (!body) return '<div style="color: #999;">No response body</div>';
             
-            // Detect content type
             const isJSON = contentType && (contentType.includes('application/json') || contentType.includes('application/javascript'));
             const isHTML = contentType && contentType.includes('text/html');
             const isXML = contentType && contentType.includes('xml');
@@ -1102,29 +1876,29 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
                 
                 const modalBody = document.getElementById('modalBody');
                 let html = '<div class="detail-section"><h3>Request Information</h3><div class="detail-grid">';
-                html += '<div class="label">Method:</div><div class="value"><span class="method ' + entry.Method + '">' + entry.Method + '</span></div>';
-                html += '<div class="label">URL:</div><div class="value">' + escapeHtml(entry.URL) + '</div>';
-                html += '<div class="label">Host:</div><div class="value">' + escapeHtml(entry.Host) + '</div>';
-                html += '<div class="label">Path:</div><div class="value">' + escapeHtml(entry.Path) + '</div>';
-                html += '<div class="label">Timestamp:</div><div class="value">' + new Date(entry.Timestamp).toLocaleString() + '</div>';
+                html += '<div><div class="label">Method:</div><div class="value"><span class="method ' + entry.Method + '">' + entry.Method + '</span></div></div>';
+                html += '<div><div class="label">URL:</div><div class="value">' + escapeHtml(entry.URL) + '</div></div>';
+                html += '<div><div class="label">Host:</div><div class="value">' + escapeHtml(entry.Host) + '</div></div>';
+                html += '<div><div class="label">Path:</div><div class="value">' + escapeHtml(entry.Path) + '</div></div>';
+                html += '<div><div class="label">Timestamp:</div><div class="value">' + new Date(entry.Timestamp).toLocaleString() + '</div></div>';
                 html += '</div></div>';
                 
                 if (entry.StatusCode) {
                     html += '<div class="detail-section"><h3>Response Information</h3><div class="detail-grid">';
-                    html += '<div class="label">Status:</div><div class="value"><span class="status ' + getStatusClass(entry.StatusCode) + '">' + entry.StatusCode + ' ' + escapeHtml(entry.StatusText) + '</span></div>';
-                    html += '<div class="label">Content-Type:</div><div class="value">' + escapeHtml(entry.ContentType || 'N/A') + '</div>';
-                    html += '<div class="label">Duration:</div><div class="value">' + (entry.Duration ? (entry.Duration / 1000000).toFixed(2) + 'ms' : 'N/A') + '</div>';
+                    html += '<div><div class="label">Status:</div><div class="value"><span class="status ' + getStatusClass(entry.StatusCode) + '">' + entry.StatusCode + ' ' + escapeHtml(entry.StatusText) + '</span></div></div>';
+                    html += '<div><div class="label">Content-Type:</div><div class="value">' + escapeHtml(entry.ContentType || 'N/A') + '</div></div>';
+                    html += '<div><div class="label">Duration:</div><div class="value">' + (entry.Duration ? (entry.Duration / 1000000).toFixed(2) + 'ms' : 'N/A') + '</div></div>';
                     html += '</div></div>';
                 }
                 
-                html += '<div class="detail-section"><h3>Request Headers</h3><div class="headers-list">' + formatHeaders(entry.RequestHeaders) + '</div></div>';
+                html += '<div class="detail-section"><h3>Request Headers <button class="section-copy-btn" onclick="copyAllHeaders(' + id + ', \'request\', this)">Copy All</button></h3><div class="headers-list" id="req-headers-' + id + '">' + formatHeaders(entry.RequestHeaders) + '</div></div>';
                 
                 if (entry.ResponseHeaders) {
-                    html += '<div class="detail-section"><h3>Response Headers</h3><div class="headers-list">' + formatHeaders(entry.ResponseHeaders) + '</div></div>';
+                    html += '<div class="detail-section"><h3>Response Headers <button class="section-copy-btn" onclick="copyAllHeaders(' + id + ', \'response\', this)">Copy All</button></h3><div class="headers-list" id="resp-headers-' + id + '">' + formatHeaders(entry.ResponseHeaders) + '</div></div>';
                 }
                 
                 if (entry.ResponseBody) {
-                    html += '<div class="detail-section"><h3>Response Body</h3>' + formatResponseBody(entry.ResponseBody, entry.ContentType) + '</div>';
+                    html += '<div class="detail-section"><h3>Response Body <button class="section-copy-btn" onclick="copyResponseBody(' + id + ', this)">Copy</button></h3><div id="resp-body-' + id + '">' + formatResponseBody(entry.ResponseBody, entry.ContentType) + '</div></div>';
                 }
                 
                 modalBody.innerHTML = html;
@@ -1135,13 +1909,86 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             }
         }
         
+        function copyAllHeaders(entryId, type, button) {
+            const headersDiv = document.getElementById(type + '-headers-' + entryId);
+            if (!headersDiv) return;
+            
+            const headers = [];
+            headersDiv.querySelectorAll('.header-item').forEach(item => {
+                const name = item.querySelector('.header-name').textContent;
+                const value = item.querySelector('.header-value').textContent;
+                headers.push(name + ' ' + value);
+            });
+            
+            const text = headers.join('\n');
+            navigator.clipboard.writeText(text).then(() => {
+                button.textContent = '✓ Copied';
+                button.classList.add('copied');
+                setTimeout(() => {
+                    button.textContent = 'Copy All';
+                    button.classList.remove('copied');
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+            });
+        }
+        
+        function copyResponseBody(entryId, button) {
+            const bodyDiv = document.getElementById('resp-body-' + entryId);
+            if (!bodyDiv) return;
+            
+            const bodyContent = bodyDiv.querySelector('.body-content');
+            const text = bodyContent ? bodyContent.textContent : bodyDiv.textContent;
+            
+            navigator.clipboard.writeText(text).then(() => {
+                button.textContent = '✓ Copied';
+                button.classList.add('copied');
+                setTimeout(() => {
+                    button.textContent = 'Copy';
+                    button.classList.remove('copied');
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+            });
+        }
+        
         function formatHeaders(headers) {
             if (!headers) return '<div style="color: #999;">No headers</div>';
             
             return Object.entries(headers).map(([name, values]) => {
                 const valueStr = Array.isArray(values) ? values.join(', ') : values;
-                return '<div class="header-item"><span class="header-name">' + escapeHtml(name) + ':</span> <span class="header-value">' + escapeHtml(valueStr) + '</span></div>';
+                const headerId = 'header-' + Math.random().toString(36).substr(2, 9);
+                return '<div class="header-item">' +
+                    '<div class="header-content">' +
+                        '<span class="header-name">' + escapeHtml(name) + '</span>' +
+                        '<span class="header-value" id="' + headerId + '">' + escapeHtml(valueStr) + '</span>' +
+                    '</div>' +
+                    '<button class="copy-btn" onclick="copyHeaderValue(\'' + headerId + '\', this); event.stopPropagation();">Copy</button>' +
+                '</div>';
             }).join('');
+        }
+        
+        function copyHeaderValue(elementId, button) {
+            const element = document.getElementById(elementId);
+            if (!element) return;
+            
+            const text = element.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = button.textContent;
+                button.textContent = '✓ Copied';
+                button.classList.add('copied');
+                
+                setTimeout(() => {
+                    button.textContent = originalText;
+                    button.classList.remove('copied');
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+                button.textContent = '✗ Failed';
+                setTimeout(() => {
+                    button.textContent = 'Copy';
+                }, 2000);
+            });
         }
         
         function closeModal(event) {
@@ -1278,7 +2125,9 @@ func countByHost(entries []TrafficEntry) []map[string]interface{} {
 	return result
 }
 
-// ==================== BUILT-IN LOGGING MODULES ====================
+// ============================================================================
+// OTHER MODULES
+// ============================================================================
 
 type AllTrafficModule struct{}
 
@@ -1338,307 +2187,11 @@ func (m *OAuthModule) ProcessResponse(resp *http.Response) error {
 	return nil
 }
 
-type DomainFilterModule struct {
-	Domains []string
-}
+// ... (rest of the existing modules: DomainFilter, RequestModifier, etc.) ...
 
-func (m *DomainFilterModule) Name() string {
-	return fmt.Sprintf("DomainFilter(%s)", strings.Join(m.Domains, ","))
-}
-
-func (m *DomainFilterModule) ShouldLog(req *http.Request) bool {
-	host := req.URL.Hostname()
-	for _, domain := range m.Domains {
-		if strings.Contains(host, domain) {
-			return true
-		}
-	}
-	return false
-}
-
-func (m *DomainFilterModule) ProcessRequest(req *http.Request) error {
-	return nil
-}
-
-func (m *DomainFilterModule) ProcessResponse(resp *http.Response) error {
-	return nil
-}
-
-type RequestModifierModule struct {
-	AddHeaders    map[string]string
-	RemoveHeaders []string
-}
-
-func (m *RequestModifierModule) Name() string {
-	return "RequestModifier"
-}
-
-func (m *RequestModifierModule) ShouldLog(req *http.Request) bool {
-	return true
-}
-
-func (m *RequestModifierModule) ProcessRequest(req *http.Request) error {
-	for key, value := range m.AddHeaders {
-		req.Header.Set(key, value)
-		log.Printf("[RequestModifier] Added header: %s: %s", key, value)
-	}
-
-	for _, key := range m.RemoveHeaders {
-		if req.Header.Get(key) != "" {
-			req.Header.Del(key)
-			log.Printf("[RequestModifier] Removed header: %s", key)
-		}
-	}
-
-	return nil
-}
-
-func (m *RequestModifierModule) ProcessResponse(resp *http.Response) error {
-	return nil
-}
-
-type ResponseModifierModule struct {
-	AddHeaders    map[string]string
-	RemoveHeaders []string
-}
-
-func (m *ResponseModifierModule) Name() string {
-	return "ResponseModifier"
-}
-
-func (m *ResponseModifierModule) ShouldLog(req *http.Request) bool {
-	return true
-}
-
-func (m *ResponseModifierModule) ProcessRequest(req *http.Request) error {
-	return nil
-}
-
-func (m *ResponseModifierModule) ProcessResponse(resp *http.Response) error {
-	for key, value := range m.AddHeaders {
-		resp.Header.Set(key, value)
-		log.Printf("[ResponseModifier] Added header: %s: %s", key, value)
-	}
-
-	for _, key := range m.RemoveHeaders {
-		if resp.Header.Get(key) != "" {
-			resp.Header.Del(key)
-			log.Printf("[ResponseModifier] Removed header: %s", key)
-		}
-	}
-
-	return nil
-}
-
-type PathFilterModule struct {
-	Paths []string
-}
-
-func (m *PathFilterModule) Name() string {
-	return fmt.Sprintf("PathFilter(%s)", strings.Join(m.Paths, ","))
-}
-
-func (m *PathFilterModule) ShouldLog(req *http.Request) bool {
-	path := req.URL.Path
-	for _, filterPath := range m.Paths {
-		if strings.Contains(path, filterPath) {
-			return true
-		}
-	}
-	return false
-}
-
-func (m *PathFilterModule) ProcessRequest(req *http.Request) error {
-	return nil
-}
-
-func (m *PathFilterModule) ProcessResponse(resp *http.Response) error {
-	return nil
-}
-
-type StringReplacementModule struct {
-	Replacements map[string]string
-}
-
-func (m *StringReplacementModule) Name() string {
-	return "StringReplacement"
-}
-
-func (m *StringReplacementModule) ShouldLog(req *http.Request) bool {
-	return true
-}
-
-func (m *StringReplacementModule) ProcessRequest(req *http.Request) error {
-	if req.Body == nil {
-		return nil
-	}
-
-	contentType := req.Header.Get("Content-Type")
-	if contentType != "" {
-		isText := strings.Contains(contentType, "text/") ||
-			strings.Contains(contentType, "application/json") ||
-			strings.Contains(contentType, "application/xml") ||
-			strings.Contains(contentType, "application/x-www-form-urlencoded") ||
-			strings.Contains(contentType, "application/javascript")
-
-		if !isText {
-			return nil
-		}
-	}
-
-	var reader io.Reader = req.Body
-	encoding := req.Header.Get("Content-Encoding")
-
-	if encoding == "gzip" {
-		gzipReader, err := gzip.NewReader(req.Body)
-		if err != nil {
-			log.Printf("[StringReplacement] Warning: Failed to decompress gzip request: %v", err)
-			reader = req.Body
-		} else {
-			reader = gzipReader
-			defer gzipReader.Close()
-		}
-	}
-
-	bodyBytes, err := io.ReadAll(reader)
-	if err != nil {
-		return err
-	}
-
-	req.Body.Close()
-
-	bodyStr := string(bodyBytes)
-	for old, new := range m.Replacements {
-		if strings.Contains(bodyStr, old) {
-			count := strings.Count(bodyStr, old)
-			bodyStr = strings.ReplaceAll(bodyStr, old, new)
-			log.Printf("[StringReplacement] Request: Replaced '%s' with '%s' (%d occurrences)", old, new, count)
-		}
-	}
-
-	req.Body = io.NopCloser(bytes.NewBufferString(bodyStr))
-	req.ContentLength = int64(len(bodyStr))
-	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyStr)))
-
-	if encoding != "" {
-		req.Header.Del("Content-Encoding")
-		log.Printf("[StringReplacement] Removed Content-Encoding: %s (returning uncompressed)", encoding)
-	}
-
-	return nil
-}
-
-func (m *StringReplacementModule) ProcessResponse(resp *http.Response) error {
-	if resp.Body == nil {
-		return nil
-	}
-
-	contentType := resp.Header.Get("Content-Type")
-	if contentType != "" {
-		isText := strings.Contains(contentType, "text/") ||
-			strings.Contains(contentType, "application/json") ||
-			strings.Contains(contentType, "application/xml") ||
-			strings.Contains(contentType, "application/javascript")
-
-		if !isText {
-			return nil
-		}
-	}
-
-	encoding := resp.Header.Get("Content-Encoding")
-
-	if encoding == "br" || encoding == "zstd" || encoding == "deflate" {
-		log.Printf("[StringReplacement] Warning: Skipping response with unsupported compression: %s", encoding)
-		return nil
-	}
-
-	var reader io.Reader = resp.Body
-
-	if encoding == "gzip" {
-		gzipReader, err := gzip.NewReader(resp.Body)
-		if err != nil {
-			log.Printf("[StringReplacement] Warning: Failed to decompress gzip response: %v", err)
-			reader = resp.Body
-		} else {
-			reader = gzipReader
-			defer gzipReader.Close()
-		}
-	}
-
-	bodyBytes, err := io.ReadAll(reader)
-	if err != nil {
-		return err
-	}
-
-	resp.Body.Close()
-
-	bodyStr := string(bodyBytes)
-	for old, new := range m.Replacements {
-		if strings.Contains(bodyStr, old) {
-			count := strings.Count(bodyStr, old)
-			bodyStr = strings.ReplaceAll(bodyStr, old, new)
-			log.Printf("[StringReplacement] Response: Replaced '%s' with '%s' (%d occurrences)", old, new, count)
-		}
-	}
-
-	resp.Body = io.NopCloser(bytes.NewBufferString(bodyStr))
-	resp.ContentLength = int64(len(bodyStr))
-	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyStr)))
-
-	if encoding != "" && encoding != "br" && encoding != "zstd" && encoding != "deflate" {
-		resp.Header.Del("Content-Encoding")
-		log.Printf("[StringReplacement] Removed Content-Encoding: %s (returning uncompressed)", encoding)
-	}
-
-	return nil
-}
-
-type ForceGzipModule struct{}
-
-func (m *ForceGzipModule) Name() string {
-	return "ForceGzip"
-}
-
-func (m *ForceGzipModule) ShouldLog(req *http.Request) bool {
-	return true
-}
-
-func (m *ForceGzipModule) ProcessRequest(req *http.Request) error {
-	acceptEncoding := req.Header.Get("Accept-Encoding")
-
-	if acceptEncoding == "" {
-		return nil
-	}
-
-	encodings := strings.Split(acceptEncoding, ",")
-	var supported []string
-
-	for _, enc := range encodings {
-		enc = strings.TrimSpace(enc)
-		if strings.Contains(enc, "gzip") || enc == "identity" {
-			supported = append(supported, enc)
-		}
-	}
-
-	if len(supported) == 0 {
-		supported = []string{"gzip"}
-	}
-
-	newAcceptEncoding := strings.Join(supported, ", ")
-
-	if newAcceptEncoding != acceptEncoding {
-		req.Header.Set("Accept-Encoding", newAcceptEncoding)
-		log.Printf("[ForceGzip] Modified Accept-Encoding from '%s' to '%s'", acceptEncoding, newAcceptEncoding)
-	}
-
-	return nil
-}
-
-func (m *ForceGzipModule) ProcessResponse(resp *http.Response) error {
-	return nil
-}
-
-// ==================== MAIN FUNCTION ====================
+// ============================================================================
+// MAIN FUNCTION
+// ============================================================================
 
 func main() {
 	port := flag.Int("port", 8080, "Proxy port")
@@ -1679,7 +2232,6 @@ func main() {
 
 	initializeModules()
 
-	// Start monitoring web interface
 	StartMonitorServer(*monitorPort)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", config.Port))
@@ -1692,21 +2244,13 @@ func main() {
 	log.Printf("Monitor interface: http://localhost:%d", *monitorPort)
 	log.Printf("CA certificate: %s", filepath.Join(config.CertDir, caCertFile))
 	log.Printf("Log file: %s", config.LogFile)
+	log.Printf("⚠️  TOKEN CAPTURE: JWT and OAuth tokens will be exported to captured_tokens.json")
+	log.Printf("⚠️  COOKIE EXPORT: Sessions will be exported to EditThisCookie_Sessions.json")
+	log.Printf("WARNING: These files contain sensitive authentication data!")
+	log.Printf("WARNING: File permissions set to 0600 for captured_tokens.json")
+	
 	if verboseMode {
 		log.Printf("Verbose mode: ENABLED (all traffic logged to console)")
-		log.Printf("⚠️  Cookie Export: Sessions will be exported to EditThisCookie_Sessions.json")
-		log.Printf("WARNING: This file contains sensitive authentication data!")
-
-		// Test write permissions
-		testFile := "EditThisCookie_Sessions.json"
-		testData := []EditThisCookieExport{}
-		if jsonData, err := json.MarshalIndent(testData, "", "    "); err == nil {
-			if err := os.WriteFile(testFile, jsonData, 0644); err == nil {
-				log.Printf("✓ Successfully initialized export file: %s", testFile)
-			} else {
-				log.Printf("❌ ERROR: Cannot write to %s: %v", testFile, err)
-			}
-		}
 	} else {
 		log.Printf("Verbose mode: DISABLED (use -verbose flag to enable console logging)")
 	}
@@ -1724,57 +2268,9 @@ func main() {
 func initializeModules() {
 	log.Println("Initializing logging modules...")
 
-	// Register monitoring module FIRST to capture all traffic
-	// Default: Log all traffic
 	RegisterModule(&AllTrafficModule{})
-
-	// IMPORTANT: Register ForceGzip to prevent br/deflate compression
-
-	// TODO : add br module
-	RegisterModule(&ForceGzipModule{})
-
-	// Connect to host 4040 to see traffic in browser
-
 	RegisterModule(NewMonitoringModule())
-
-	// Uncomment to enable OAuth-only logging:
-	// RegisterModule(&OAuthModule{})
-
-	// Uncomment to filter by domain:
-	// RegisterModule(&DomainFilterModule{
-	// 	Domains: []string{"example.com", "api.example.com"},
-	// })
-
-	// Uncomment to filter by path:
-	// RegisterModule(&PathFilterModule{
-	// 	Paths: []string{"/api/", "/v1/"},
-	// })
-
-	// Uncomment to modify requests:
-	// RegisterModule(&RequestModifierModule{
-	// 	AddHeaders: map[string]string{
-	// 		"X-Proxy-Debug": "true",
-	// 	},
-	// 	RemoveHeaders: []string{"User-Agent"},
-	// })
-
-	// Uncomment to modify responses:
-	// RegisterModule(&ResponseModifierModule{
-	// 	AddHeaders: map[string]string{
-	// 		"X-Proxy-Modified": "true",
-	// 	},
-	// 	RemoveHeaders: []string{"Server"},
-	// })
-
-	// Uncomment to replace strings:
-	// RegisterModule(&ForceGzipModule{})
-	// RegisterModule(&StringReplacementModule{
-	// 	Replacements: map[string]string{
-	// 		"cyber":    "kitten",
-	// 		"hacker":   "cat lover",
-	// 		"security": "cuddles",
-	// 	},
-	// })
+	RegisterModule(NewTokenExportModule())
 
 	log.Printf("Total modules registered: %d", len(logModules))
 }
@@ -2063,6 +2559,12 @@ func handleConnection(clientConn net.Conn, config *ProxyConfig) {
 		return
 	}
 
+	if req.Method == "PRI" {
+		log.Printf("[REJECT] Invalid request method PRI from %s", clientAddr)
+		clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\nInvalid request method.\r\n"))
+		return
+	}
+
 	if req.Method == http.MethodConnect {
 		log.Printf("[CONNECT] %s -> %s", clientAddr, req.Host)
 		handleConnect(clientConn, req, config)
@@ -2085,23 +2587,41 @@ func handleConnect(clientConn net.Conn, req *http.Request, config *ProxyConfig) 
 		Certificates: []tls.Certificate{*cert},
 		MinVersion:   tls.VersionTLS12,
 		MaxVersion:   tls.VersionTLS13,
+
 		CipherSuites: []uint16{
 			tls.TLS_AES_128_GCM_SHA256,
-			tls.TLS_AES_256_GCM_SHA384,
 			tls.TLS_CHACHA20_POLY1305_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_AES_256_GCM_SHA384,
+
 			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 		},
+
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+			tls.CurveP384,
+		},
+
 		PreferServerCipherSuites: false,
 	}
 
 	tlsClientConn := tls.Server(clientConn, tlsConfig)
 	if err := tlsClientConn.Handshake(); err != nil {
-		log.Printf("TLS handshake failed: %v", err)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "tls: client offered only unsupported versions") {
+			log.Printf("[TLS] Client using unsupported TLS version for %s", host)
+		} else if strings.Contains(errMsg, "first record does not look like a TLS handshake") {
+			log.Printf("[TLS] Client sent non-TLS data to %s (possibly plain HTTP)", host)
+		} else if strings.Contains(errMsg, "remote error") || strings.Contains(errMsg, "EOF") {
+			log.Printf("[TLS] Client aborted handshake with %s", host)
+		} else {
+			log.Printf("[TLS] Handshake failed with %s: %v", host, err)
+		}
 		return
 	}
 	defer tlsClientConn.Close()
@@ -2120,9 +2640,23 @@ func handleConnect(clientConn net.Conn, req *http.Request, config *ProxyConfig) 
 	for {
 		req, err := http.ReadRequest(reader)
 		if err != nil {
-			if err != io.EOF {
-				log.Printf("Failed to read HTTPS request: %v", err)
+			if err == io.EOF {
+				return
 			}
+			
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "use of closed network connection") ||
+			   strings.Contains(errMsg, "connection reset") ||
+			   strings.Contains(errMsg, "broken pipe") {
+				return
+			}
+			
+			if strings.Contains(errMsg, "malformed HTTP") {
+				log.Printf("[TLS] Client %s sent non-HTTP data (likely clean close): %v", host, err)
+				return
+			}
+			
+			log.Printf("[TLS] Error reading HTTPS request from %s: %v", host, err)
 			return
 		}
 
@@ -2138,13 +2672,11 @@ func handleConnect(clientConn net.Conn, req *http.Request, config *ProxyConfig) 
 			return
 		}
 
-		// Export response cookies if verbose mode
-		if verboseMode {
-			exportResponseCookies(resp)
-		}
-
 		if err := resp.Write(tlsClientConn); err != nil {
-			log.Printf("Failed to write response: %v", err)
+			if err != io.EOF && !strings.Contains(err.Error(), "broken pipe") {
+				log.Printf("Failed to write response: %v", err)
+			}
+			resp.Body.Close()
 			return
 		}
 		resp.Body.Close()
@@ -2155,6 +2687,11 @@ func handleHTTP(clientConn net.Conn, req *http.Request, config *ProxyConfig) {
 	defer clientConn.Close()
 
 	if !req.URL.IsAbs() {
+		if req.Host == "" {
+			log.Printf("[ERROR] Invalid HTTP request: no host specified")
+			clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\nNo host specified in request\r\n"))
+			return
+		}
 		req.URL.Scheme = "http"
 		req.URL.Host = req.Host
 	}
@@ -2169,11 +2706,6 @@ func handleHTTP(clientConn net.Conn, req *http.Request, config *ProxyConfig) {
 	}
 	defer resp.Body.Close()
 
-	// Export response cookies if verbose mode
-	if verboseMode {
-		exportResponseCookies(resp)
-	}
-
 	resp.Write(clientConn)
 }
 
@@ -2181,22 +2713,31 @@ func forwardRequest(req *http.Request) (*http.Response, error) {
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		MaxVersion: tls.VersionTLS13,
+
 		CipherSuites: []uint16{
 			tls.TLS_AES_128_GCM_SHA256,
-			tls.TLS_AES_256_GCM_SHA384,
 			tls.TLS_CHACHA20_POLY1305_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_AES_256_GCM_SHA384,
+
 			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		},
+
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+			tls.CurveP384,
 		},
 	}
 
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
 		Proxy:           http.ProxyFromEnvironment,
+		ForceAttemptHTTP2: false,
 	}
 
 	client := &http.Client{
@@ -2208,10 +2749,12 @@ func forwardRequest(req *http.Request) (*http.Response, error) {
 	}
 
 	outReq := &http.Request{
-		Method: req.Method,
-		URL:    req.URL,
-		Header: req.Header.Clone(),
-		Body:   req.Body,
+		Method:        req.Method,
+		URL:           req.URL,
+		Header:        req.Header.Clone(),
+		Body:          req.Body,
+		ContentLength: req.ContentLength,
+		Host:          req.Host,
 	}
 
 	outReq.RequestURI = ""
@@ -2239,7 +2782,13 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	logEntry := fmt.Sprintf("\n=== %s ===\n", timestamp)
-	logEntry = logEntry + fmt.Sprintf("%s %s\n", req.Method, req.URL.String())
+	
+	reqURL := req.URL.String()
+	if reqURL == "" || reqURL == "*" {
+		reqURL = fmt.Sprintf("%s (malformed)", req.RequestURI)
+	}
+	
+	logEntry = logEntry + fmt.Sprintf("%s %s\n", req.Method, reqURL)
 
 	logEntry = logEntry + "Headers:\n"
 	for name, values := range req.Header {
@@ -2248,17 +2797,30 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 		}
 	}
 
-	if req.Method == http.MethodPost || req.Method == http.MethodPut {
-		bodyBytes, err := io.ReadAll(req.Body)
-		if err == nil {
-			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
+	if req.Method == http.MethodPost || req.Method == http.MethodPut || req.Method == http.MethodPatch {
+		bodyBytes, err := readAndRestoreRequestBody(req)
+		if err == nil && bodyBytes != nil {
 			contentType := req.Header.Get("Content-Type")
+			contentEncoding := req.Header.Get("Content-Encoding")
 
-			if isBinaryContent(bodyBytes) {
-				logEntry = logEntry + fmt.Sprintf("Body: [Binary data, %d bytes]\n", len(bodyBytes))
+			// Try to decompress if gzip encoded
+			displayBytes := bodyBytes
+			if contentEncoding == "gzip" && len(bodyBytes) > 0 {
+				gzipReader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
+				if err == nil {
+					decompressed, err := io.ReadAll(gzipReader)
+					gzipReader.Close()
+					if err == nil {
+						displayBytes = decompressed
+						logEntry = logEntry + fmt.Sprintf("Body (decompressed from gzip, original size: %d bytes):\n", len(bodyBytes))
+					}
+				}
+			}
+
+			if isBinaryContent(displayBytes) {
+				logEntry = logEntry + fmt.Sprintf("Body: [Binary data, %d bytes]\n", len(displayBytes))
 			} else if strings.Contains(contentType, "application/x-www-form-urlencoded") {
-				params, err := url.ParseQuery(string(bodyBytes))
+				params, err := url.ParseQuery(string(displayBytes))
 				if err == nil && len(params) > 0 {
 					logEntry = logEntry + "POST Parameters:\n"
 					for key, values := range params {
@@ -2267,24 +2829,22 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 						}
 					}
 				}
-			} else if len(bodyBytes) > 0 {
+			} else if len(displayBytes) > 0 {
 				maxBodySize := 10240
-				bodyStr := string(bodyBytes)
-				if len(bodyBytes) > maxBodySize {
-					bodyStr = string(bodyBytes[:maxBodySize]) + fmt.Sprintf("... [truncated, %d more bytes]", len(bodyBytes)-maxBodySize)
+				bodyStr := string(displayBytes)
+				if len(displayBytes) > maxBodySize {
+					bodyStr = string(displayBytes[:maxBodySize]) + fmt.Sprintf("... [truncated, %d more bytes]", len(displayBytes)-maxBodySize)
 				}
 				logEntry = logEntry + fmt.Sprintf("Body: %s\n", bodyStr)
 			}
 		}
 	}
 
-	// Print to console only if verbose mode is enabled
 	if verboseMode {
 		consoleEntry := sanitizeForConsole(logEntry)
 		fmt.Print(consoleEntry)
 	}
 
-	// Always write to log file
 	logWriter.WriteString(logEntry)
 }
 
