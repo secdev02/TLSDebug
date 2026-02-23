@@ -50,9 +50,9 @@ import (
 )
 
 const (
-	caCertFile = "proxy-ca.crt"
-	caKeyFile  = "proxy-ca.key"
-	logFile    = "proxy.log"
+	caCertFile  = "proxy-ca.crt"
+	caKeyFile   = "proxy-ca.key"
+	logFileBase = "proxy" // base name; timestamp appended at runtime
 )
 
 type ProxyConfig struct {
@@ -96,15 +96,22 @@ type CertCache struct {
 }
 
 var (
-	caCert      *x509.Certificate
-	caKey       *rsa.PrivateKey
-	certCache   = &CertCache{certs: make(map[string]*tls.Certificate)}
-	certConfig  *CertConfig
-	logMutex    sync.Mutex
-	logWriter   *os.File
-	logModules  []LogModule
-	verboseMode bool
+	caCert           *x509.Certificate
+	caKey            *rsa.PrivateKey
+	certCache        = &CertCache{certs: make(map[string]*tls.Certificate)}
+	certConfig       *CertConfig
+	logMutex         sync.Mutex
+	logWriter        *os.File
+	logModules       []LogModule
+	verboseMode      bool
+	sessionTimestamp string // set once at startup; shared by all output files in the session
 )
+
+// timestampedFilename returns a filename with the session timestamp embedded.
+// Example: timestampedFilename("captured_tokens", "json") -> "captured_tokens_20060102_150405.json"
+func timestampedFilename(base, ext string) string {
+	return base + "_" + sessionTimestamp + "." + ext
+}
 
 type LogModule interface {
 	Name() string
@@ -193,10 +200,10 @@ type EditThisCookieExport struct {
 }
 
 type TokenExport struct {
-	JWTTokens   []JWTToken   `json:"jwt_tokens"`
-	OAuthTokens []OAuthToken `json:"oauth_tokens"`
+	JWTTokens   []JWTToken             `json:"jwt_tokens"`
+	OAuthTokens []OAuthToken           `json:"oauth_tokens"`
 	Cookies     []EditThisCookieExport `json:"cookies"`
-	LastUpdated time.Time    `json:"last_updated"`
+	LastUpdated time.Time              `json:"last_updated"`
 }
 
 var (
@@ -289,20 +296,20 @@ func base64DecodeSegment(seg string) ([]byte, error) {
 
 func extractJWTFromString(text string, source string, requestURL string) []*JWTToken {
 	var tokens []*JWTToken
-	
+
 	// Pattern: eyJ... (typical JWT start)
 	words := strings.Fields(text)
 	for _, word := range words {
 		// Remove common surrounding characters
 		word = strings.Trim(word, `"',;:()[]{}`)
-		
+
 		if strings.HasPrefix(word, "eyJ") && strings.Count(word, ".") == 2 {
 			if jwt := parseJWT(word, source, requestURL); jwt != nil {
 				tokens = append(tokens, jwt)
 			}
 		}
 	}
-	
+
 	return tokens
 }
 
@@ -455,7 +462,7 @@ func (m *TokenExportModule) ProcessRequest(req *http.Request) error {
 					}
 				}
 			}
-			
+
 			if !isBinaryContent(displayBytes) {
 				bodyStr := string(displayBytes)
 				contentType := req.Header.Get("Content-Type")
@@ -486,7 +493,7 @@ func (m *TokenExportModule) ProcessRequest(req *http.Request) error {
 	// Extract from URL parameters
 	if req.URL.RawQuery != "" {
 		values := req.URL.Query()
-		
+
 		// Check for access_token in URL
 		if at := values.Get("access_token"); at != "" {
 			token := &OAuthToken{
@@ -579,7 +586,7 @@ func (m *TokenExportModule) ProcessResponse(resp *http.Response) error {
 		if strings.Contains(contentType, "application/json") {
 			if token := extractOAuthTokensFromJSON(bodyStr, "Response Body (JSON)", respURL); token != nil {
 				addOAuthToken(token)
-				
+
 				// Also check if id_token is a JWT
 				if token.IDToken != "" && strings.HasPrefix(token.IDToken, "eyJ") {
 					if jwt := parseJWT(token.IDToken, "Response Body (ID Token)", respURL); jwt != nil {
@@ -667,8 +674,8 @@ func addOAuthToken(token *OAuthToken) {
 }
 
 func saveTokenExport() {
-	filename := "captured_tokens.json"
-	
+	filename := timestampedFilename("captured_tokens", "json")
+
 	jsonData, err := json.MarshalIndent(tokenExport, "", "    ")
 	if err != nil {
 		log.Printf("[EXPORT] ERROR: Failed to marshal tokens JSON: %v", err)
@@ -681,7 +688,7 @@ func saveTokenExport() {
 		return
 	}
 
-	log.Printf("[EXPORT] ✓ Saved %d JWTs, %d OAuth tokens, %d cookies to %s", 
+	log.Printf("[EXPORT] ✓ Saved %d JWTs, %d OAuth tokens, %d cookies to %s",
 		len(tokenExport.JWTTokens), len(tokenExport.OAuthTokens), len(tokenExport.Cookies), filename)
 }
 
@@ -767,7 +774,7 @@ func exportResponseCookies(resp *http.Response) {
 	// Also save to old format for compatibility
 	jsonData, err := json.MarshalIndent(tokenExport.Cookies, "", "    ")
 	if err == nil {
-		os.WriteFile("EditThisCookie_Sessions.json", jsonData, 0644)
+		os.WriteFile(timestampedFilename("EditThisCookie_Sessions", "json"), jsonData, 0644)
 	}
 
 	saveTokenExport()
@@ -791,11 +798,11 @@ func readAndRestoreRequestBody(req *http.Request) ([]byte, error) {
 
 	// Restore the body
 	req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-	
+
 	// Fix Content-Length header to prevent 411 errors
 	req.ContentLength = int64(len(bodyBytes))
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-	
+
 	// Remove Transfer-Encoding: chunked if present, since we now have Content-Length
 	// Note: This is different from Content-Encoding (gzip, br, etc.)
 	req.Header.Del("Transfer-Encoding")
@@ -2204,13 +2211,14 @@ func main() {
 	flag.Parse()
 
 	verboseMode = *verbose
+	sessionTimestamp = time.Now().Format("20060102_150405")
 
 	certConfig = loadConfig(*configFile)
 
 	config := &ProxyConfig{
 		Port:        *port,
 		CertDir:     *certDir,
-		LogFile:     filepath.Join(*certDir, logFile),
+		LogFile:     filepath.Join(*certDir, timestampedFilename(logFileBase, "log")),
 		SkipInstall: *skipInstall,
 	}
 
@@ -2244,11 +2252,11 @@ func main() {
 	log.Printf("Monitor interface: http://localhost:%d", *monitorPort)
 	log.Printf("CA certificate: %s", filepath.Join(config.CertDir, caCertFile))
 	log.Printf("Log file: %s", config.LogFile)
-	log.Printf("⚠️  TOKEN CAPTURE: JWT and OAuth tokens will be exported to captured_tokens.json")
-	log.Printf("⚠️  COOKIE EXPORT: Sessions will be exported to EditThisCookie_Sessions.json")
+	log.Printf("⚠️  TOKEN CAPTURE: JWT and OAuth tokens will be exported to %s", timestampedFilename("captured_tokens", "json"))
+	log.Printf("⚠️  COOKIE EXPORT: Sessions will be exported to %s", timestampedFilename("EditThisCookie_Sessions", "json"))
 	log.Printf("WARNING: These files contain sensitive authentication data!")
 	log.Printf("WARNING: File permissions set to 0600 for captured_tokens.json")
-	
+
 	if verboseMode {
 		log.Printf("Verbose mode: ENABLED (all traffic logged to console)")
 	} else {
@@ -2643,19 +2651,19 @@ func handleConnect(clientConn net.Conn, req *http.Request, config *ProxyConfig) 
 			if err == io.EOF {
 				return
 			}
-			
+
 			errMsg := err.Error()
 			if strings.Contains(errMsg, "use of closed network connection") ||
-			   strings.Contains(errMsg, "connection reset") ||
-			   strings.Contains(errMsg, "broken pipe") {
+				strings.Contains(errMsg, "connection reset") ||
+				strings.Contains(errMsg, "broken pipe") {
 				return
 			}
-			
+
 			if strings.Contains(errMsg, "malformed HTTP") {
 				log.Printf("[TLS] Client %s sent non-HTTP data (likely clean close): %v", host, err)
 				return
 			}
-			
+
 			log.Printf("[TLS] Error reading HTTPS request from %s: %v", host, err)
 			return
 		}
@@ -2735,8 +2743,8 @@ func forwardRequest(req *http.Request) (*http.Response, error) {
 	}
 
 	transport := &http.Transport{
-		TLSClientConfig: tlsConfig,
-		Proxy:           http.ProxyFromEnvironment,
+		TLSClientConfig:   tlsConfig,
+		Proxy:             http.ProxyFromEnvironment,
 		ForceAttemptHTTP2: false,
 	}
 
@@ -2782,12 +2790,12 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	logEntry := fmt.Sprintf("\n=== %s ===\n", timestamp)
-	
+
 	reqURL := req.URL.String()
 	if reqURL == "" || reqURL == "*" {
 		reqURL = fmt.Sprintf("%s (malformed)", req.RequestURI)
 	}
-	
+
 	logEntry = logEntry + fmt.Sprintf("%s %s\n", req.Method, reqURL)
 
 	logEntry = logEntry + "Headers:\n"
