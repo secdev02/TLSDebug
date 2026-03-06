@@ -167,7 +167,7 @@ RUN NOVNC_WEB=$(cat /opt/novnc_path) && cat > "${NOVNC_WEB}/index.html" << 'HTML
       strip();
       msg('Connecting...', true);
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = proto + '//' + location.hostname + ':' + (location.port||'6080') + '/websockify';
+      const url = proto + '//' + location.hostname + ':' + (location.port||'6080');
       rfb = new RFB(scrn, url, { credentials: {password:''} });
       rfb.scaleViewport = true;
       rfb.resizeSession = true;
