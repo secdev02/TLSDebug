@@ -123,6 +123,14 @@ RUN NOVNC_WEB=$(cat /opt/novnc_path) && cat > "${NOVNC_WEB}/index.html" << 'HTML
                  overflow:hidden; background:#000; }
     #screen    { position:fixed; top:0; left:0;
                  width:100vw; height:100vh; background:#000; }
+    /* Force the injected noVNC canvas to fill the container exactly */
+    #screen canvas, #noVNC_canvas {
+      display:block!important;
+      position:absolute!important;
+      top:0!important; left:0!important;
+      width:100%!important; height:100%!important;
+      border:none!important; outline:none!important;
+    }
     /* Nuke every noVNC chrome element by ID and class */
     #noVNC_control_bar_anchor, #noVNC_control_bar,
     #noVNC_control_bar_handle, #noVNC_hint_anchor,
@@ -174,14 +182,23 @@ RUN NOVNC_WEB=$(cat /opt/novnc_path) && cat > "${NOVNC_WEB}/index.html" << 'HTML
       const url = proto + '//' + location.hostname + ':' + port;
       rfb = new RFB(scrn, url, { credentials: {password:''} });
       rfb.scaleViewport = true;
-      rfb.resizeSession = false;
+      rfb.resizeSession = true;
       rfb.clipViewport  = false;
       rfb.showDotCursor = false;
       rfb.background    = '#000000';
-      rfb.addEventListener('connect',    ()  => { strip(); msg('TLSDebug Active'); });
+      rfb.addEventListener('connect', () => {
+        strip();
+        msg('TLSDebug Active');
+        // Immediately sync session size to the actual viewport
+        rfb.resizeSession = true;
+      });
       rfb.addEventListener('disconnect', ()  => { msg('Reconnecting...', true); setTimeout(connect, 3000); });
       rfb.addEventListener('credentialsrequired', () => rfb.sendCredentials({password:''}));
     }
+
+    // Keep session size in sync whenever the browser window is resized
+    new ResizeObserver(() => { if (rfb) rfb.resizeSession = true; })
+      .observe(document.documentElement);
 
     connect();
   </script>
