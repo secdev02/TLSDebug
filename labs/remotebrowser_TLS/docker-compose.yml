@@ -35,7 +35,7 @@ services:
       DISPLAY: ":99"
       CHROME_REMOTE_DEBUGGING_PORT: "9222"
       # Change START_URL to set the browser's home page
-      START_URL: "https://www.google.com"
+      START_URL: "https://microsoft.com"
       # Enable HTTPS for noVNC (set to "true" to enable)
       NOVNC_ENABLE_HTTPS: "true"
       # When HTTPS is enabled:
