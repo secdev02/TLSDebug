@@ -33,8 +33,8 @@ EXPOSE 8888
 # Access the CA cert at: http://<host>:8888/proxy-ca.crt
 # The shell waits for all; if any process exits, the container stops.
 ENTRYPOINT ["sh", "-c", \
-  "/app/tlsproxy --skip-install --certdir /app/certs --port 8080 & \
-   /app/tlsproxy --skip-install --certdir /app/certs --port 4040 & \
+  "/app/tlsproxy --verbose --skip-install --certdir /app/certs --port 8080 & \
+   /app/tlsproxy --verbose --skip-install --certdir /app/certs --port 4040 & \
    cd /app/certs && python3 -m http.server 8888 & \
    wait"]
 
