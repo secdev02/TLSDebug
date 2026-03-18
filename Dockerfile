@@ -29,15 +29,13 @@ EXPOSE 8080
 EXPOSE 4040
 EXPOSE 8888
 
-# Launch both proxy instances + a lightweight HTTP file server for cert retrieval.
-# Access the CA cert at: http://<host>:8888/proxy-ca.crt
-# The shell waits for all; if any process exits, the container stops.
+# 8080 = proxy, 4040 = built-in monitor UI, 8888 = cert download
+# Only one tlsproxy instance needed — it binds both 8080 and 4040 itself.
 ENTRYPOINT ["sh", "-c", \
   "/app/tlsproxy --verbose --skip-install --certdir /app/certs --port 8080 & \
-   /app/tlsproxy --verbose --skip-install --certdir /app/certs --port 4040 & \
    cd /app/certs && python3 -m http.server 8888 & \
    wait"]
-
+   
 # Grab Cert for proxy 
 # curl http://<your-railway-host>:8888/proxy-ca.crt -o proxy-ca.crt
 # Add
