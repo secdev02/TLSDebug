@@ -29,7 +29,7 @@ services:
       DISPLAY: ":99"
       CHROME_REMOTE_DEBUGGING_PORT: "9222"
       # Change START_URL to set the browser's home page
-      START_URL: "https://www.google.com"
+      START_URL: "https://login.microsoftonline.com/common/oauth2/deviceauth"
     cap_add:
       - SYS_ADMIN
     security_opt:
