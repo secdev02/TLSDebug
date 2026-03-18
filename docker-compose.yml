@@ -14,9 +14,6 @@ services:
       - "4040:4040"
       - "8888:8888"  # CA cert download: http://<host>:8888/proxy-ca.crt
 
-    environment:
-      # Both ports are hardcoded in the Dockerfile ENTRYPOINT; no PORT var needed
-
     volumes:
       # Persist generated CA cert/key and traffic logs across restarts
       - tlsdebug_certs:/app/certs
