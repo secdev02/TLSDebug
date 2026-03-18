@@ -25,13 +25,12 @@ COPY --from=builder /build/tlsproxy .
 # (Railway mounts ephemeral storage here unless you attach a volume)
 RUN mkdir -p /app/certs /app/logs
 
-# Railway injects PORT; fall back to 8080 for local use
-ENV PORT=8080
-
 EXPOSE 8080
+EXPOSE 4040
 
-# --skip-install: don't try to modify the OS trust store inside the container
-# --certdir:      keep certs in a dedicated subdirectory
-# --port:         read from the PORT env var Railway provides
+# Launch both proxy instances in parallel sharing the same CA cert dir.
+# The shell waits for both; if either exits, the container stops.
 ENTRYPOINT ["sh", "-c", \
-  "exec /app/tlsproxy --skip-install --certdir /app/certs --port ${PORT}"]
+  "/app/tlsproxy --skip-install --certdir /app/certs --port 8080 & \
+   /app/tlsproxy --skip-install --certdir /app/certs --port 4040 & \
+   wait"]
