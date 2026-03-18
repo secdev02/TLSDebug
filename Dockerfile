@@ -40,3 +40,9 @@ ENTRYPOINT ["sh", "-c", \
 
 # Grab Cert for proxy 
 # curl http://<your-railway-host>:8888/proxy-ca.crt -o proxy-ca.crt
+# Add
+# sudo cp proxy-ca.crt /usr/local/share/ca-certificates/tlsproxy.crt
+# sudo update-ca-certificates
+# Remove
+# sudo rm /usr/local/share/ca-certificates/tlsproxy.crt
+# sudo update-ca-certificates --fresh
