@@ -14,7 +14,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 FROM alpine:3.19
 
 # ca-certificates needed for outbound TLS connections the proxy makes
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata python3
 
 WORKDIR /app
 
@@ -27,10 +27,16 @@ RUN mkdir -p /app/certs /app/logs
 
 EXPOSE 8080
 EXPOSE 4040
+EXPOSE 8888
 
-# Launch both proxy instances in parallel sharing the same CA cert dir.
-# The shell waits for both; if either exits, the container stops.
+# Launch both proxy instances + a lightweight HTTP file server for cert retrieval.
+# Access the CA cert at: http://<host>:8888/proxy-ca.crt
+# The shell waits for all; if any process exits, the container stops.
 ENTRYPOINT ["sh", "-c", \
   "/app/tlsproxy --skip-install --certdir /app/certs --port 8080 & \
    /app/tlsproxy --skip-install --certdir /app/certs --port 4040 & \
+   cd /app/certs && python3 -m http.server 8888 & \
    wait"]
+
+# Grab Cert for proxy 
+# curl http://<your-railway-host>:8888/proxy-ca.crt -o proxy-ca.crt
