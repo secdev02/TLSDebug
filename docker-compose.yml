@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  tlsdebug:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tlsdebug
+    restart: unless-stopped
+
+    ports:
+      # host:container  — change the left sides if ports are already in use locally
+      - "8080:8080"
+      - "4040:4040"
+      - "8888:8888"  # CA cert download: http://<host>:8888/proxy-ca.crt
+
+    environment:
+      # Both ports are hardcoded in the Dockerfile ENTRYPOINT; no PORT var needed
+
+    volumes:
+      # Persist generated CA cert/key and traffic logs across restarts
+      - tlsdebug_certs:/app/certs
+      - tlsdebug_logs:/app/logs
+
+    # Optional: resource limits (tweak to taste)
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
+
+volumes:
+  tlsdebug_certs:
+  tlsdebug_logs:
