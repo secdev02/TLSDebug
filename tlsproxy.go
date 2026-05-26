@@ -104,6 +104,22 @@ var (
 	logWriter   *os.File
 	logModules  []LogModule
 	verboseMode bool
+	
+	// Performance optimization: reusable HTTP client with connection pooling
+	httpClient  *http.Client
+	httpTransport *http.Transport
+	
+	// Reusable TLS configurations
+	tlsConfigMutex sync.RWMutex
+	tlsConfigClient *tls.Config
+	tlsConfigServer *tls.Config
+	
+	// Buffer pool for reducing memory allocations
+	bufferPool = sync.Pool{
+		New: func() interface{} {
+			return new(bytes.Buffer)
+		},
+	}
 )
 
 type LogModule interface {
@@ -946,25 +962,31 @@ type TrafficStore struct {
 	entries    []TrafficEntry
 	nextID     int
 	maxEntries int
+	// Channel-based notification to reduce lock contention
+	notifyChan chan struct{}
 }
 
 var trafficStore = &TrafficStore{
 	entries:    make([]TrafficEntry, 0),
 	nextID:     1,
 	maxEntries: 1000,
+	notifyChan: make(chan struct{}, 1),
 }
 
 func (ts *TrafficStore) AddEntry(entry TrafficEntry) {
 	ts.Lock()
-	defer ts.Unlock()
-
 	entry.ID = ts.nextID
 	ts.nextID++
-
 	ts.entries = append(ts.entries, entry)
-
 	if len(ts.entries) > ts.maxEntries {
 		ts.entries = ts.entries[len(ts.entries)-ts.maxEntries:]
+	}
+	ts.Unlock()
+	
+	// Non-blocking notification for UI refresh
+	select {
+	case ts.notifyChan <- struct{}{}:
+	default:
 	}
 }
 
@@ -2231,6 +2253,11 @@ func main() {
 	defer logWriter.Close()
 
 	initializeModules()
+	initializeHTTPClient()
+	tlsConfigMutex.Lock()
+	tlsConfigClient = getTLSClientConfig()
+	tlsConfigServer = getTLSServerConfig()
+	tlsConfigMutex.Unlock()
 
 	StartMonitorServer(*monitorPort)
 
@@ -2255,13 +2282,31 @@ func main() {
 		log.Printf("Verbose mode: DISABLED (use -verbose flag to enable console logging)")
 	}
 
+	// Use a channel-based goroutine pool for better resource management
+	connChan := make(chan net.Conn, 32)
+
+	// Spawn worker goroutines
+	for i := 0; i < 64; i++ {
+		go func() {
+			for conn := range connChan {
+				handleConnection(conn, config)
+			}
+		}()
+	}
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Printf("Accept error: %v", err)
 			continue
 		}
-		go handleConnection(conn, config)
+		// Non-blocking send to worker pool
+		select {
+		case connChan <- conn:
+		default:
+			// All workers busy, spawn a new goroutine
+			go handleConnection(conn, config)
+		}
 	}
 }
 
@@ -2273,6 +2318,78 @@ func initializeModules() {
 	RegisterModule(NewTokenExportModule())
 
 	log.Printf("Total modules registered: %d", len(logModules))
+}
+
+func initializeHTTPClient() {
+	httpTransport = &http.Transport{
+		TLSClientConfig: getTLSClientConfig(),
+		Proxy:           http.ProxyFromEnvironment,
+		ForceAttemptHTTP2: false,
+		// Connection pooling settings
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		MaxConnsPerHost:     32,
+		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   false,
+		DisableCompression:  false,
+		ReadBufferSize:      32 * 1024,
+		WriteBufferSize:     32 * 1024,
+	}
+
+	httpClient = &http.Client{
+		Transport: httpTransport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Timeout: 30 * time.Second,
+	}
+}
+
+func getTLSClientConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		MaxVersion: tls.VersionTLS13,
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		},
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+			tls.CurveP384,
+		},
+	}
+}
+
+func getTLSServerConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		MaxVersion:   tls.VersionTLS13,
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		},
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+			tls.CurveP384,
+		},
+		PreferServerCipherSuites: false,
+	}
 }
 
 func loadConfig(configPath string) *CertConfig {
@@ -2583,31 +2700,19 @@ func handleConnect(clientConn net.Conn, req *http.Request, config *ProxyConfig) 
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
 	cert := getCertForHost(host)
+	
+	// Get cached server TLS config and customize for this certificate
+	tlsConfigMutex.RLock()
+	baseConfig := tlsConfigServer
+	tlsConfigMutex.RUnlock()
+	
 	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{*cert},
-		MinVersion:   tls.VersionTLS12,
-		MaxVersion:   tls.VersionTLS13,
-
-		CipherSuites: []uint16{
-			tls.TLS_AES_128_GCM_SHA256,
-			tls.TLS_CHACHA20_POLY1305_SHA256,
-			tls.TLS_AES_256_GCM_SHA384,
-
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-		},
-
-		CurvePreferences: []tls.CurveID{
-			tls.X25519,
-			tls.CurveP256,
-			tls.CurveP384,
-		},
-
-		PreferServerCipherSuites: false,
+		Certificates:             []tls.Certificate{*cert},
+		MinVersion:               baseConfig.MinVersion,
+		MaxVersion:               baseConfig.MaxVersion,
+		CipherSuites:             baseConfig.CipherSuites,
+		CurvePreferences:         baseConfig.CurvePreferences,
+		PreferServerCipherSuites: baseConfig.PreferServerCipherSuites,
 	}
 
 	tlsClientConn := tls.Server(clientConn, tlsConfig)
@@ -2710,44 +2815,6 @@ func handleHTTP(clientConn net.Conn, req *http.Request, config *ProxyConfig) {
 }
 
 func forwardRequest(req *http.Request) (*http.Response, error) {
-	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		MaxVersion: tls.VersionTLS13,
-
-		CipherSuites: []uint16{
-			tls.TLS_AES_128_GCM_SHA256,
-			tls.TLS_CHACHA20_POLY1305_SHA256,
-			tls.TLS_AES_256_GCM_SHA384,
-
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-		},
-
-		CurvePreferences: []tls.CurveID{
-			tls.X25519,
-			tls.CurveP256,
-			tls.CurveP384,
-		},
-	}
-
-	transport := &http.Transport{
-		TLSClientConfig: tlsConfig,
-		Proxy:           http.ProxyFromEnvironment,
-		ForceAttemptHTTP2: false,
-	}
-
-	client := &http.Client{
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-		Timeout: 30 * time.Second,
-	}
-
 	outReq := &http.Request{
 		Method:        req.Method,
 		URL:           req.URL,
@@ -2760,7 +2827,7 @@ func forwardRequest(req *http.Request) (*http.Response, error) {
 	outReq.RequestURI = ""
 	outReq.Header.Del("Proxy-Connection")
 
-	resp, err := client.Do(outReq)
+	resp, err := httpClient.Do(outReq)
 	if err != nil {
 		return nil, err
 	}
