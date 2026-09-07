@@ -62,6 +62,11 @@ type ProxyConfig struct {
 	SkipInstall bool
 }
 
+type TopicGravityConfig struct {
+	Gravity string
+	Replace string
+}
+
 type CertConfig struct {
 	Organization      string
 	CommonName        string
@@ -138,6 +143,103 @@ func executeModulesResponse(resp *http.Response) error {
 		}
 	}
 	return nil
+}
+
+type TopicGravityModule struct {
+	config TopicGravityConfig
+}
+
+func NewTopicGravityModule(config TopicGravityConfig) *TopicGravityModule {
+	return &TopicGravityModule{config: config}
+}
+
+func (m *TopicGravityModule) Name() string {
+	return "TopicGravity"
+}
+
+func (m *TopicGravityModule) ShouldLog(req *http.Request) bool {
+	return false
+}
+
+func (m *TopicGravityModule) ProcessRequest(req *http.Request) error {
+	if req.Method != http.MethodPost || req.Body == nil || m.config.Gravity == "" {
+		return nil
+	}
+
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return err
+	}
+	rewritten, changed, err := applyTopicGravity(body, m.config)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		rewritten = body
+	}
+
+	req.Body = io.NopCloser(bytes.NewReader(rewritten))
+	req.ContentLength = int64(len(rewritten))
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(rewritten)))
+	req.TransferEncoding = nil
+	return nil
+}
+
+func (m *TopicGravityModule) ProcessResponse(resp *http.Response) error {
+	return nil
+}
+
+func applyTopicGravity(body []byte, config TopicGravityConfig) ([]byte, bool, error) {
+	if config.Replace != "" {
+		rewritten := bytes.ReplaceAll(body, []byte(config.Replace), []byte(config.Gravity))
+		return rewritten, !bytes.Equal(body, rewritten), nil
+	}
+
+	var payload interface{}
+	if err := json.Unmarshal(body, &payload); err == nil {
+		changed := appendGravityToPromptFields(payload, config.Gravity)
+		if changed {
+			rewritten, err := json.Marshal(payload)
+			return rewritten, true, err
+		}
+		return body, false, nil
+	}
+
+	rewritten := append(append([]byte{}, body...), []byte("\n"+config.Gravity)...)
+	return rewritten, true, nil
+}
+
+func appendGravityToPromptFields(value interface{}, gravity string) bool {
+	changed := false
+	switch current := value.(type) {
+	case map[string]interface{}:
+		for key, child := range current {
+			if text, ok := child.(string); ok && isPromptField(key) {
+				current[key] = strings.TrimRight(text, " \t\r\n") + "\n" + gravity
+				changed = true
+				continue
+			}
+			if appendGravityToPromptFields(child, gravity) {
+				changed = true
+			}
+		}
+	case []interface{}:
+		for _, child := range current {
+			if appendGravityToPromptFields(child, gravity) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func isPromptField(key string) bool {
+	switch strings.ToLower(key) {
+	case "prompt", "input", "content":
+		return true
+	default:
+		return false
+	}
 }
 
 // ============================================================================
@@ -2201,6 +2303,8 @@ func main() {
 	configFile := flag.String("config", "proxy-config.ini", "Configuration file path")
 	monitorPort := flag.Int("monitor-port", 4040, "Monitor web interface port")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging (log all traffic to console)")
+	topicGravity := flag.String("topic-gravity", "", "Append this context sentence to POST prompts")
+	topicGravityReplace := flag.String("topic-gravity-replace", "", "Replace this phrase in POST request bodies with the topic gravity sentence")
 	flag.Parse()
 
 	verboseMode = *verbose
@@ -2230,7 +2334,10 @@ func main() {
 	}
 	defer logWriter.Close()
 
-	initializeModules()
+	initializeModules(TopicGravityConfig{
+		Gravity: *topicGravity,
+		Replace: *topicGravityReplace,
+	})
 
 	StartMonitorServer(*monitorPort)
 
@@ -2265,12 +2372,15 @@ func main() {
 	}
 }
 
-func initializeModules() {
+func initializeModules(topicGravityConfig TopicGravityConfig) {
 	log.Println("Initializing logging modules...")
 
 	RegisterModule(&AllTrafficModule{})
 	RegisterModule(NewMonitoringModule())
 	RegisterModule(NewTokenExportModule())
+	if topicGravityConfig.Gravity != "" {
+		RegisterModule(NewTopicGravityModule(topicGravityConfig))
+	}
 
 	log.Printf("Total modules registered: %d", len(logModules))
 }

@@ -9,6 +9,7 @@ A minimalist TLS intercepting proxy written in Go. Single file, no external depe
 - Request/response logging with headers and POST parameters
 - Console output sanitization (prevents terminal beeping)
 - Extensible logging module system
+- Opt-in topic gravity for rewriting POST requests sent to LLM platforms
 - Configurable certificate extensions (SAN, AIA, CDP, OCSP)
 - Single binary, no dependencies
 - Cross-platform (Windows, macOS, Linux)
@@ -138,8 +139,24 @@ requests.get('https://api.example.com', proxies=proxies, verify='proxy-ca.crt')
 -port int          Proxy port (default 8080)
 -certdir string    Certificate directory (default ".")
 -config string     Configuration file (default "proxy-config.ini")
--cleanup          Remove CA certificates and exit
--skip-install     Skip automatic certificate installation
+-cleanup                 Remove CA certificates and exit
+-skip-install            Skip automatic certificate installation
+-topic-gravity           Append a context sentence to POST prompt fields
+-topic-gravity-replace   Replace a phrase in POST bodies with the gravity sentence
+```
+
+### Topic Gravity
+
+Topic gravity is opt-in and applies to intercepted `POST` requests when
+`-topic-gravity` is provided. For JSON LLM payloads it appends the gravity
+sentence to fields named `prompt`, `input`, or `content`. Valid JSON without
+one of those fields is left unchanged. Non-JSON bodies receive the sentence as
+plain text. When `-topic-gravity-replace` is provided, matching text is
+replaced instead of appended:
+
+```bash
+./tlsproxy -topic-gravity "Keep the answer focused on networking." \
+    -topic-gravity-replace "Answer generally."
 ```
 
 ### Cleanup
