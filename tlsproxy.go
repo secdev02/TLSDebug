@@ -1112,6 +1112,8 @@ func StartMonitorServer(port int) {
 	http.HandleFunc("/api/entry/", handleAPIEntry)
 	http.HandleFunc("/api/clear", handleAPIClear)
 	http.HandleFunc("/api/stats", handleAPIStats)
+	http.HandleFunc("/ca-cert", handleCACertDownload)
+	http.HandleFunc("/ca.crt", handleCACertDownload)
 
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("[MONITOR] Starting monitor server on http://localhost%s", addr)
@@ -1121,6 +1123,22 @@ func StartMonitorServer(port int) {
 			log.Printf("[MONITOR] Server error: %v", err)
 		}
 	}()
+}
+
+// handleCACertDownload serves the CA certificate as a downloadable .crt
+// file so it can be exported with a single request (curl/Invoke-WebRequest,
+// or opening the URL in a browser) instead of copying PEM text by hand.
+// It re-encodes the in-memory certificate rather than reading proxy-ca.crt
+// off disk, so it works the same regardless of -certdir.
+func handleCACertDownload(w http.ResponseWriter, r *http.Request) {
+	if caCert == nil {
+		http.Error(w, "CA certificate not yet initialized", http.StatusServiceUnavailable)
+		return
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})
+	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	w.Header().Set("Content-Disposition", `attachment; filename="tlsproxy-ca.crt"`)
+	w.Write(pemBytes)
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -2201,6 +2219,7 @@ func main() {
 	configFile := flag.String("config", "proxy-config.ini", "Configuration file path")
 	monitorPort := flag.Int("monitor-port", 4040, "Monitor web interface port")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging (log all traffic to console)")
+	exportCA := flag.String("export-ca", "", "Export the CA certificate PEM to this path ('-' for stdout) and exit, without starting the proxy")
 	flag.Parse()
 
 	verboseMode = *verbose
@@ -2223,6 +2242,13 @@ func main() {
 		log.Fatalf("Failed to initialize CA: %v", err)
 	}
 
+	if *exportCA != "" {
+		if err := exportCACert(*exportCA); err != nil {
+			log.Fatalf("Failed to export CA certificate: %v", err)
+		}
+		return
+	}
+
 	var err error
 	logWriter, err = os.OpenFile(config.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
@@ -2233,6 +2259,8 @@ func main() {
 	initializeModules()
 
 	StartMonitorServer(*monitorPort)
+
+	printCACertExportImportInfo(*monitorPort)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", config.Port))
 	if err != nil {
@@ -3084,6 +3112,78 @@ func uninstallCertLinux() error {
 	}
 
 	return nil
+}
+
+// exportCACert writes the loaded CA certificate as PEM to the given path,
+// or to stdout when path is "-". It's the scriptable counterpart to the
+// download endpoint and console printout below, for e.g. pulling the cert
+// out of a running/remote instance in an automated setup step:
+//
+//	./tlsproxy -export-ca ca.crt
+//	./tlsproxy -export-ca - > ca.crt
+func exportCACert(path string) error {
+	if caCert == nil {
+		return fmt.Errorf("CA certificate not loaded")
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})
+
+	if path == "-" {
+		_, err := os.Stdout.Write(pemBytes)
+		return err
+	}
+	if err := os.WriteFile(path, pemBytes, 0644); err != nil {
+		return err
+	}
+	log.Printf("CA certificate exported to %s", path)
+	return nil
+}
+
+// printCACertExportImportInfo prints the CA certificate as copy/paste-able
+// PEM text, the URL it can be downloaded from while the proxy is running,
+// and ready-to-run Windows import commands (PowerShell and certutil). This
+// covers the case where the proxy runs somewhere the operator's Windows
+// workstation can't reach the filesystem directly (a remote host, a
+// container, etc.), so everything needed to export and import the CA is
+// copyable straight out of the console/log output.
+func printCACertExportImportInfo(monitorPort int) {
+	if caCert == nil {
+		return
+	}
+	pemText := strings.TrimRight(string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})), "\r\n")
+	downloadURL := fmt.Sprintf("http://localhost:%d/ca-cert", monitorPort)
+
+	log.Println("")
+	log.Println("================================================================")
+	log.Println(" CA CERTIFICATE - export & import on a Windows workstation")
+	log.Println("================================================================")
+	if certConfig != nil {
+		log.Printf(" Subject: CN=%s, O=%s", certConfig.CommonName, certConfig.Organization)
+	}
+	log.Println(" NOTE: if this host's certificate storage isn't persisted")
+	log.Println(" (e.g. an ephemeral container), a restart generates a NEW CA")
+	log.Println(" and you'll need to export/import it again.")
+	log.Println("")
+	log.Printf(" Export while the proxy is running: %s", downloadURL)
+	log.Println(" (substitute this host's real address if connecting remotely)")
+	log.Println("")
+	log.Println("---- Easiest: download + import in one PowerShell command ----")
+	log.Printf(`Invoke-WebRequest %s -OutFile "$env:TEMP\tlsproxy-ca.crt"; Import-Certificate -FilePath "$env:TEMP\tlsproxy-ca.crt" -CertStoreLocation Cert:\CurrentUser\Root`, downloadURL)
+	log.Println("")
+	log.Println("---- Or paste the certificate PEM directly (no network needed) ----")
+	log.Println(pemText)
+	log.Println("")
+	log.Println("$pem = @'")
+	log.Println(pemText)
+	log.Println("'@")
+	log.Println(`$path = Join-Path $env:TEMP 'tlsproxy-ca.crt'`)
+	log.Println("Set-Content -Path $path -Value $pem -Encoding ascii")
+	log.Println(`Import-Certificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\Root`)
+	log.Println("")
+	log.Println("---- Or certutil (Command Prompt, after saving the PEM above) ----")
+	log.Println("  certutil -addstore -user Root tlsproxy-ca.crt")
+	log.Println("  (drop -user and run elevated to install machine-wide instead)")
+	log.Println("================================================================")
+	log.Println("")
 }
 
 func printManualInstallInstructions(certPath string) {
