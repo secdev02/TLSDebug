@@ -21,6 +21,8 @@ Browse any HTTPS site in the remote Chrome - all traffic will be intercepted and
 - **TLSDebug Proxy** - Intercepts and logs all HTTPS traffic
 - **Debug Monitor** - Port 4040 shows live traffic, tokens, and sessions
 - **Auto CA Trust** - Proxy certificate automatically trusted in Chrome
+- **Proxy Extension** - Manifest V3 extension routes Chrome through `127.0.0.1:8080`
+- **Back Control** - Floating arrow in the top-left returns to the previous page
 
 ## Ports
 
@@ -48,6 +50,31 @@ All logs and tokens are saved to `./logs/` on your host:
 - `EditThisCookie_Sessions.json` - All captured cookies and sessions
 - `captured_tokens.json` - JWT and OAuth tokens
 - `proxy-ca.crt` - CA certificate (if you need to trust it elsewhere)
+- `proxy-ca.key` - CA private key; keep this file secret
+
+## Persistent CA
+
+The image build creates a unique CA pair without committing it to Git. On the
+first container start, that pair is copied into `./logs`. Later starts reuse
+the persisted pair when the certificate is valid and its public key matches
+the private key.
+
+Before Chrome starts, the container compares the exact CA SHA-256 fingerprint
+with the Debian trust store and both Chrome NSS databases. It writes only
+stores that do not already contain the matching CA. Chrome is launched with
+the bundled extension and without certificate-error bypass flags.
+
+To rotate the CA, stop the container, remove `logs/proxy-ca.crt` and
+`logs/proxy-ca.key`, then run:
+
+```bash
+docker compose build --no-cache
+docker compose up
+```
+
+The private key exists in the built image and `./logs`. Anyone who can read
+either can issue certificates trusted by the lab, so do not publish the image
+or trust this CA outside a controlled debugging environment.
 
 ## Configuration
 

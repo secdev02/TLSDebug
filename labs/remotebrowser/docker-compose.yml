@@ -1,8 +1,8 @@
 services:
   tlsdebug:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: labs/remotebrowser/Dockerfile
     image: tlsdebug:latest
     container_name: tlsdebug
     ports:

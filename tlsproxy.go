@@ -25,6 +25,7 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -151,19 +152,19 @@ type JWTHeader struct {
 }
 
 type JWTToken struct {
-	Raw        string                 `json:"raw"`
-	Header     map[string]interface{} `json:"header"`
-	Payload    map[string]interface{} `json:"payload"`
-	Signature  string                 `json:"signature"`
-	Source     string                 `json:"source"`
-	URL        string                 `json:"url"`
-	Timestamp  time.Time              `json:"timestamp"`
-	Expiry     *time.Time             `json:"expiry,omitempty"`
-	IssuedAt   *time.Time             `json:"issuedAt,omitempty"`
-	NotBefore  *time.Time             `json:"notBefore,omitempty"`
-	Issuer     string                 `json:"issuer,omitempty"`
-	Subject    string                 `json:"subject,omitempty"`
-	Audience   interface{}            `json:"audience,omitempty"`
+	Raw       string                 `json:"raw"`
+	Header    map[string]interface{} `json:"header"`
+	Payload   map[string]interface{} `json:"payload"`
+	Signature string                 `json:"signature"`
+	Source    string                 `json:"source"`
+	URL       string                 `json:"url"`
+	Timestamp time.Time              `json:"timestamp"`
+	Expiry    *time.Time             `json:"expiry,omitempty"`
+	IssuedAt  *time.Time             `json:"issuedAt,omitempty"`
+	NotBefore *time.Time             `json:"notBefore,omitempty"`
+	Issuer    string                 `json:"issuer,omitempty"`
+	Subject   string                 `json:"subject,omitempty"`
+	Audience  interface{}            `json:"audience,omitempty"`
 }
 
 type OAuthToken struct {
@@ -193,10 +194,10 @@ type EditThisCookieExport struct {
 }
 
 type TokenExport struct {
-	JWTTokens   []JWTToken   `json:"jwt_tokens"`
-	OAuthTokens []OAuthToken `json:"oauth_tokens"`
+	JWTTokens   []JWTToken             `json:"jwt_tokens"`
+	OAuthTokens []OAuthToken           `json:"oauth_tokens"`
 	Cookies     []EditThisCookieExport `json:"cookies"`
-	LastUpdated time.Time    `json:"last_updated"`
+	LastUpdated time.Time              `json:"last_updated"`
 }
 
 var (
@@ -289,20 +290,20 @@ func base64DecodeSegment(seg string) ([]byte, error) {
 
 func extractJWTFromString(text string, source string, requestURL string) []*JWTToken {
 	var tokens []*JWTToken
-	
+
 	// Pattern: eyJ... (typical JWT start)
 	words := strings.Fields(text)
 	for _, word := range words {
 		// Remove common surrounding characters
 		word = strings.Trim(word, `"',;:()[]{}`)
-		
+
 		if strings.HasPrefix(word, "eyJ") && strings.Count(word, ".") == 2 {
 			if jwt := parseJWT(word, source, requestURL); jwt != nil {
 				tokens = append(tokens, jwt)
 			}
 		}
 	}
-	
+
 	return tokens
 }
 
@@ -455,7 +456,7 @@ func (m *TokenExportModule) ProcessRequest(req *http.Request) error {
 					}
 				}
 			}
-			
+
 			if !isBinaryContent(displayBytes) {
 				bodyStr := string(displayBytes)
 				contentType := req.Header.Get("Content-Type")
@@ -486,7 +487,7 @@ func (m *TokenExportModule) ProcessRequest(req *http.Request) error {
 	// Extract from URL parameters
 	if req.URL.RawQuery != "" {
 		values := req.URL.Query()
-		
+
 		// Check for access_token in URL
 		if at := values.Get("access_token"); at != "" {
 			token := &OAuthToken{
@@ -579,7 +580,7 @@ func (m *TokenExportModule) ProcessResponse(resp *http.Response) error {
 		if strings.Contains(contentType, "application/json") {
 			if token := extractOAuthTokensFromJSON(bodyStr, "Response Body (JSON)", respURL); token != nil {
 				addOAuthToken(token)
-				
+
 				// Also check if id_token is a JWT
 				if token.IDToken != "" && strings.HasPrefix(token.IDToken, "eyJ") {
 					if jwt := parseJWT(token.IDToken, "Response Body (ID Token)", respURL); jwt != nil {
@@ -668,7 +669,7 @@ func addOAuthToken(token *OAuthToken) {
 
 func saveTokenExport() {
 	filename := "captured_tokens.json"
-	
+
 	jsonData, err := json.MarshalIndent(tokenExport, "", "    ")
 	if err != nil {
 		log.Printf("[EXPORT] ERROR: Failed to marshal tokens JSON: %v", err)
@@ -681,7 +682,7 @@ func saveTokenExport() {
 		return
 	}
 
-	log.Printf("[EXPORT] ✓ Saved %d JWTs, %d OAuth tokens, %d cookies to %s", 
+	log.Printf("[EXPORT] ✓ Saved %d JWTs, %d OAuth tokens, %d cookies to %s",
 		len(tokenExport.JWTTokens), len(tokenExport.OAuthTokens), len(tokenExport.Cookies), filename)
 }
 
@@ -791,11 +792,11 @@ func readAndRestoreRequestBody(req *http.Request) ([]byte, error) {
 
 	// Restore the body
 	req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-	
+
 	// Fix Content-Length header to prevent 411 errors
 	req.ContentLength = int64(len(bodyBytes))
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-	
+
 	// Remove Transfer-Encoding: chunked if present, since we now have Content-Length
 	// Note: This is different from Content-Encoding (gzip, br, etc.)
 	req.Header.Del("Transfer-Encoding")
@@ -2248,7 +2249,7 @@ func main() {
 	log.Printf("⚠️  COOKIE EXPORT: Sessions will be exported to EditThisCookie_Sessions.json")
 	log.Printf("WARNING: These files contain sensitive authentication data!")
 	log.Printf("WARNING: File permissions set to 0600 for captured_tokens.json")
-	
+
 	if verboseMode {
 		log.Printf("Verbose mode: ENABLED (all traffic logged to console)")
 	} else {
@@ -2383,7 +2384,16 @@ func initCA(config *ProxyConfig) error {
 	keyPath := filepath.Join(config.CertDir, caKeyFile)
 
 	if fileExists(certPath) && fileExists(keyPath) {
-		return loadCA(certPath, keyPath)
+		if err := loadCA(certPath, keyPath); err != nil {
+			return err
+		}
+		if !config.SkipInstall {
+			if err := installCertificate(certPath); err != nil {
+				log.Printf("WARNING: Failed to verify or install existing CA: %v", err)
+				printManualInstallInstructions(certPath)
+			}
+		}
+		return nil
 	}
 
 	return generateCA(certPath, keyPath, config.SkipInstall)
@@ -2643,19 +2653,19 @@ func handleConnect(clientConn net.Conn, req *http.Request, config *ProxyConfig) 
 			if err == io.EOF {
 				return
 			}
-			
+
 			errMsg := err.Error()
 			if strings.Contains(errMsg, "use of closed network connection") ||
-			   strings.Contains(errMsg, "connection reset") ||
-			   strings.Contains(errMsg, "broken pipe") {
+				strings.Contains(errMsg, "connection reset") ||
+				strings.Contains(errMsg, "broken pipe") {
 				return
 			}
-			
+
 			if strings.Contains(errMsg, "malformed HTTP") {
 				log.Printf("[TLS] Client %s sent non-HTTP data (likely clean close): %v", host, err)
 				return
 			}
-			
+
 			log.Printf("[TLS] Error reading HTTPS request from %s: %v", host, err)
 			return
 		}
@@ -2735,8 +2745,8 @@ func forwardRequest(req *http.Request) (*http.Response, error) {
 	}
 
 	transport := &http.Transport{
-		TLSClientConfig: tlsConfig,
-		Proxy:           http.ProxyFromEnvironment,
+		TLSClientConfig:   tlsConfig,
+		Proxy:             http.ProxyFromEnvironment,
 		ForceAttemptHTTP2: false,
 	}
 
@@ -2782,12 +2792,12 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	logEntry := fmt.Sprintf("\n=== %s ===\n", timestamp)
-	
+
 	reqURL := req.URL.String()
 	if reqURL == "" || reqURL == "*" {
 		reqURL = fmt.Sprintf("%s (malformed)", req.RequestURI)
 	}
-	
+
 	logEntry = logEntry + fmt.Sprintf("%s %s\n", req.Method, reqURL)
 
 	logEntry = logEntry + "Headers:\n"
@@ -2958,16 +2968,135 @@ func installCertificate(certPath string) error {
 		return err
 	}
 
+	installed, err := certificateInstalled(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to check certificate trust: %w", err)
+	}
+	if installed {
+		log.Printf("Matching CA certificate is already installed")
+		return nil
+	}
+
 	switch runtime.GOOS {
 	case "windows":
-		return installCertWindows(absPath)
+		err = installCertWindows(absPath)
 	case "darwin":
-		return installCertMacOS(absPath)
+		err = installCertMacOS(absPath)
 	case "linux":
-		return installCertLinux(absPath)
+		err = installCertLinux(absPath)
 	default:
 		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
+	if err != nil {
+		return err
+	}
+
+	installed, err = certificateInstalled(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to verify certificate trust: %w", err)
+	}
+	if !installed {
+		return fmt.Errorf("certificate installation completed but the exact CA fingerprint was not found")
+	}
+	return nil
+}
+
+func certificateInstalled(certPath string) (bool, error) {
+	expected, err := certificateFingerprintFile(certPath)
+	if err != nil {
+		return false, err
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		return certificateInstalledWindows(expected)
+	case "darwin":
+		return certificateInstalledMacOS(expected)
+	case "linux":
+		return certificateInstalledLinux(expected)
+	default:
+		return false, fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
+	}
+}
+
+func certificateFingerprintFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", fmt.Errorf("failed to decode certificate PEM: %s", path)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", err
+	}
+	return certificateFingerprint(cert), nil
+}
+
+func certificateFingerprint(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.Raw)
+	return fmt.Sprintf("%x", sum)
+}
+
+func pemContainsFingerprint(data []byte, expected string) bool {
+	for len(data) > 0 {
+		block, rest := pem.Decode(data)
+		if block == nil {
+			return false
+		}
+		data = rest
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err == nil && certificateFingerprint(cert) == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func certificateInstalledWindows(expected string) (bool, error) {
+	powerShell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		return false, fmt.Errorf("powershell.exe not found: %w", err)
+	}
+	script := fmt.Sprintf(
+		`$sha=[Security.Cryptography.SHA256]::Create(); $match=Get-ChildItem Cert:\CurrentUser\Root | Where-Object { ([BitConverter]::ToString($sha.ComputeHash($_.RawData))).Replace('-','').ToLowerInvariant() -eq '%s' }; if ($match) { exit 0 } else { exit 1 }`,
+		expected,
+	)
+	err = exec.Command(powerShell, "-NoProfile", "-NonInteractive", "-Command", script).Run()
+	if err == nil {
+		return true, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
+}
+
+func certificateInstalledMacOS(expected string) (bool, error) {
+	output, err := exec.Command(
+		"security", "find-certificate", "-a", "-p", "/Library/Keychains/System.keychain",
+	).Output()
+	if err != nil {
+		return false, err
+	}
+	return pemContainsFingerprint(output, expected), nil
+}
+
+func certificateInstalledLinux(expected string) (bool, error) {
+	const trustedCertPath = "/usr/local/share/ca-certificates/tlsproxy.crt"
+	if !fileExists(trustedCertPath) {
+		return false, nil
+	}
+	actual, err := certificateFingerprintFile(trustedCertPath)
+	if err != nil {
+		return false, nil
+	}
+	return actual == expected, nil
 }
 
 func installCertWindows(certPath string) error {
@@ -2990,17 +3119,6 @@ func installCertWindows(certPath string) error {
 		return fmt.Errorf("certutil failed: %v - %s", err, string(output))
 	}
 
-	log.Printf("Verifying certificate installation...")
-	verifyCmd := exec.Command("certutil", "-user", "-verifystore", "Root", "TLS Proxy Root CA")
-	verifyOutput, verifyErr := verifyCmd.CombinedOutput()
-
-	if verifyErr != nil {
-		log.Printf("Warning: Could not verify certificate installation: %v", verifyErr)
-		log.Printf("Verification output: %s", string(verifyOutput))
-		return fmt.Errorf("certificate may not be installed correctly - please check manually")
-	}
-
-	log.Printf("Certificate verified in trust store")
 	return nil
 }
 

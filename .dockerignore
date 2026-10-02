@@ -1,0 +1,6 @@
+.git
+.tools
+**/logs
+proxy-ca.crt
+proxy-ca.key
+*.log

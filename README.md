@@ -30,7 +30,34 @@ The proxy listens on `localhost:8080` by default.
 
 ## Certificate Installation
 
-The proxy automatically generates a CA certificate (`proxy-ca.crt`) and attempts to install it to your system trust store on first run.
+The proxy generates `proxy-ca.crt` and `proxy-ca.key` only when a pair is not
+already present in `-certdir`. On every native start it compares the exact
+SHA-256 fingerprint with the relevant Windows, macOS, or Linux trust store.
+It reuses a matching CA without changing the trust store and invokes the
+platform installer only when that exact CA is absent.
+
+Keep both files together and protect `proxy-ca.key`. Copying only one file or
+replacing either file creates an unusable pair.
+
+### Remote Browser Lab
+
+The Docker labs build a CA into each image and copy it to the bind-mounted
+`./logs` directory on first run. Later container starts and image rebuilds
+reuse the valid persistent pair from `./logs`. The bundled Manifest V3 Chrome
+extension configures the browser to use `127.0.0.1:8080`; no certificate-error
+bypass flags are used.
+
+To rotate the lab CA:
+
+1. Stop the container.
+2. Remove `logs/proxy-ca.crt` and `logs/proxy-ca.key`.
+3. Rebuild the image with `docker compose build --no-cache`.
+4. Start the container and restart any external clients that trusted the old CA.
+
+The CA private key is not committed to Git, but it is present in the built
+container image and in `./logs`. Anyone who can read either can issue
+certificates trusted by that lab. Do not distribute the image or trust its CA
+outside controlled debugging environments.
 
 ### Windows
 
