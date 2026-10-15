@@ -19,6 +19,7 @@ proxy-config.ini
 captured_tokens.json
 EditThisCookie_Sessions.json
 *.log
+*.json
 certs/
 
 # Docker lab runtime volumes/logs
