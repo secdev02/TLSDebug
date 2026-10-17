@@ -23,16 +23,22 @@ scanning. The bytes and Content-Encoding forwarded to the client stay as
 the origin sent them. Brotli, zstd, and deflate are not decoded.
 
 The rest of this package is split by job: CA and leaf certificates, the
-accept loop, logging modules, token export, and the web monitor. It is
-still one binary with no external dependencies.
+accept loop, logging modules, token export, and the web monitor.
+
+Sideband is the code name for the non-HTTP path. It is off unless a
+-sideband-* flag is set. TLS, DTLS, and QUIC use this CA. WireGuard uses
+the keys in -sideband-wg. Packet bytes go to packets.bin and packets.jsonl.
 */
 
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"path/filepath"
+
+	"tlsdebug/sideband"
 )
 
 const (
@@ -54,6 +60,15 @@ func main() {
 	monitorPort := flag.Int("monitor-port", 4040, "Monitor web interface port")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging (log all traffic to console)")
 	exportCA := flag.String("export-ca", "", "Export the CA certificate PEM to this path ('-' for stdout) and exit, without starting the proxy")
+	sidebandTCP := flag.String("sideband-tcp", "", "Sideband TCP listen address (TLS, STARTTLS, and raw TCP). Empty disables it")
+	sidebandUDP := flag.String("sideband-udp", "", "Sideband raw UDP listen address. Empty disables it")
+	sidebandDTLS := flag.String("sideband-dtls", "", "Sideband DTLS listen address. Empty disables it")
+	sidebandQUIC := flag.String("sideband-quic", "", "Sideband QUIC listen address. Empty disables it")
+	sidebandUpstream := flag.String("sideband-upstream", "", "Origin host:port for Sideband listeners")
+	sidebandWG := flag.String("sideband-wg", "", "WireGuard ini for the Sideband dual tunnel. Empty disables it")
+	sidebandMTLS := flag.Bool("sideband-mtls-require", false, "Require a client certificate on Sideband TLS, DTLS, and QUIC")
+	sidebandClientCert := flag.String("sideband-client-cert", "", "Certificate presented to the Sideband origin for mutual TLS")
+	sidebandClientKey := flag.String("sideband-client-key", "", "Private key presented to the Sideband origin for mutual TLS")
 	flag.Parse()
 
 	verboseMode = *verbose
@@ -125,6 +140,8 @@ func main() {
 		log.Printf("Verbose mode: DISABLED (use -verbose flag to enable console logging)")
 	}
 
+	startSideband(config.CertDir, *sidebandTCP, *sidebandUDP, *sidebandDTLS, *sidebandQUIC, *sidebandUpstream, *sidebandWG, *sidebandMTLS, *sidebandClientCert, *sidebandClientKey)
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -152,4 +169,90 @@ func initializeModules() {
 	RegisterModule(NewTokenExportModule())
 
 	log.Printf("Total modules registered: %d", len(logModules))
+}
+
+// hostCerts adapts the proxy CA to Sideband. Sideband is the code name for
+// the non-HTTP intercept path.
+type hostCerts struct{}
+
+func (hostCerts) Certificate(host string) (*tls.Certificate, error) {
+	return getCertForHost(host)
+}
+
+func startSideband(certDir, tcp, udp, dtlsAddr, quicAddr, upstream, wgPath string, mtlsRequire bool, clientCertPath, clientKeyPath string) {
+	if tcp == "" && udp == "" && dtlsAddr == "" && quicAddr == "" && wgPath == "" {
+		return
+	}
+	if upstream == "" && wgPath == "" {
+		log.Fatal("sideband listeners require -sideband-upstream")
+	}
+	var clientCert *tls.Certificate
+	if clientCertPath != "" || clientKeyPath != "" {
+		if clientCertPath == "" || clientKeyPath == "" {
+			log.Fatal("sideband mutual TLS needs both -sideband-client-cert and -sideband-client-key")
+		}
+		pair, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+		if err != nil {
+			log.Fatalf("Sideband client certificate: %v", err)
+		}
+		clientCert = &pair
+	}
+	logger, err := sideband.OpenLogger(certDir)
+	if err != nil {
+		log.Fatalf("Sideband log: %v", err)
+	}
+	srv := &sideband.Server{
+		TCPListen:   tcp,
+		UDPListen:   udp,
+		Upstream:    upstream,
+		Certs:       hostCerts{},
+		Log:         logger,
+		MTLSRequire: mtlsRequire,
+		ClientCert:  clientCert,
+	}
+	if tcp != "" {
+		go func() {
+			log.Printf("[SIDEBAND] TCP listening on %s, upstream %s", tcp, upstream)
+			if err := srv.ServeTCP(); err != nil {
+				log.Printf("[SIDEBAND] TCP ended: %v", err)
+			}
+		}()
+	}
+	if udp != "" {
+		go func() {
+			log.Printf("[SIDEBAND] UDP listening on %s, upstream %s", udp, upstream)
+			if err := srv.ServeUDP(); err != nil {
+				log.Printf("[SIDEBAND] UDP ended: %v", err)
+			}
+		}()
+	}
+	if dtlsAddr != "" {
+		go func() {
+			log.Printf("[SIDEBAND] DTLS listening on %s, upstream %s", dtlsAddr, upstream)
+			if err := srv.ServeDTLS(dtlsAddr); err != nil {
+				log.Printf("[SIDEBAND] DTLS ended: %v", err)
+			}
+		}()
+	}
+	if quicAddr != "" {
+		go func() {
+			log.Printf("[SIDEBAND] QUIC listening on %s, upstream %s", quicAddr, upstream)
+			if err := srv.ServeQUIC(quicAddr); err != nil {
+				log.Printf("[SIDEBAND] QUIC ended: %v", err)
+			}
+		}()
+	}
+	if wgPath != "" {
+		cfg, err := sideband.LoadWireGuardConfig(wgPath)
+		if err != nil {
+			log.Fatalf("Sideband WireGuard config: %v", err)
+		}
+		go func() {
+			log.Printf("[SIDEBAND] WireGuard client listen %d, origin %s", cfg.ClientListen, cfg.OriginEndpoint)
+			if err := srv.ServeWireGuard(cfg); err != nil {
+				log.Printf("[SIDEBAND] WireGuard ended: %v", err)
+			}
+		}()
+	}
+	log.Printf("[SIDEBAND] packets: %s and %s", filepath.Join(certDir, "packets.bin"), filepath.Join(certDir, "packets.jsonl"))
 }
