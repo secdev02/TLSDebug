@@ -1,6 +1,9 @@
 package sideband
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/binary"
+)
 
 // classifyUDP reports which module owns the first datagram.
 //
@@ -65,9 +68,60 @@ func starttlsKind(banner []byte) string {
 		return "pop3"
 	case bytes.Contains(s, []byte("<stream:stream")):
 		return "xmpp"
+	case ldapStartTLS(s):
+		return "ldap"
 	default:
 		return ""
 	}
+}
+
+// ldapStartTLS reports an LDAP StartTLS extended request. The OID is
+// 1.3.6.1.4.1.1466.20037, either in BER or as ASCII.
+func ldapStartTLS(b []byte) bool {
+	if bytes.Contains(b, []byte("1.3.6.1.4.1.1466.20037")) {
+		return true
+	}
+	return bytes.Contains(b, []byte{0x2b, 0x06, 0x01, 0x04, 0x01, 0x8b, 0x46, 0x81, 0x9c, 0x65})
+}
+
+// tlsRecordFields reads a TLS record header. Handshake type is present when
+// the record is a handshake and the fragment byte is in this buffer.
+func tlsRecordFields(b []byte) map[string]any {
+	if len(b) < 5 {
+		return map[string]any{"len": len(b)}
+	}
+	fields := map[string]any{
+		"content_type": b[0],
+		"version":      binary.BigEndian.Uint16(b[1:3]),
+		"record_len":   binary.BigEndian.Uint16(b[3:5]),
+	}
+	if b[0] == 22 && len(b) > 5 {
+		fields["handshake_type"] = b[5]
+	}
+	return fields
+}
+
+// dtlsRecordFields reads a DTLS record header: epoch and 48-bit sequence
+// sit where TLS has only a version and length.
+func dtlsRecordFields(b []byte) map[string]any {
+	if len(b) < 13 {
+		return map[string]any{"len": len(b)}
+	}
+	var seq uint64
+	for _, x := range b[5:11] {
+		seq = seq<<8 | uint64(x)
+	}
+	fields := map[string]any{
+		"content_type": b[0],
+		"version":      binary.BigEndian.Uint16(b[1:3]),
+		"epoch":        binary.BigEndian.Uint16(b[3:5]),
+		"sequence":     seq,
+		"record_len":   binary.BigEndian.Uint16(b[11:13]),
+	}
+	if b[0] == 22 && len(b) > 13 {
+		fields["handshake_type"] = b[13]
+	}
+	return fields
 }
 
 func hasPrefixFold(b, prefix []byte) bool {

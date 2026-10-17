@@ -33,7 +33,12 @@ func (s *Server) ServeUDP() error {
 			flow := s.newFlow("udp", key)
 			f = &udpFlow{flow: flow, addr: addr, pc: pc, ch: make(chan []byte, 32)}
 			flows[key] = f
-			go f.run(s.Upstream)
+			go func(key string, f *udpFlow) {
+				f.run(s.Upstream)
+				mu.Lock()
+				delete(flows, key)
+				mu.Unlock()
+			}(key, f)
 		}
 		mu.Unlock()
 		f.push(pkt)
@@ -78,9 +83,29 @@ func (f *udpFlow) run(upstream string) {
 			}
 		}
 	}()
-	for pkt := range f.ch {
-		f.flow.Log(DirClientToProxy, LayerWire, ProtoUDP, pkt, nil)
-		_, _ = origin.Write(pkt)
-		f.flow.Log(DirProxyToOrigin, LayerWire, ProtoUDP, pkt, nil)
+	// An idle flow expires so a client that went away does not keep a dialed socket.
+	idle := time.NewTimer(2 * time.Minute)
+	defer idle.Stop()
+	for {
+		select {
+		case pkt, ok := <-f.ch:
+			if !ok {
+				return
+			}
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(2 * time.Minute)
+			fields := map[string]any{"len": len(pkt), "client": f.flow.meta.Client, "upstream": upstream}
+			_ = (udpModule{}).Forward(f.flow, Packet{Direction: DirClientToProxy, Layer: LayerWire, Proto: ProtoUDP, Payload: pkt, Fields: fields})
+			_, _ = origin.Write(pkt)
+			fields["len"] = len(pkt)
+			_ = (udpModule{}).Forward(f.flow, Packet{Direction: DirProxyToOrigin, Layer: LayerWire, Proto: ProtoUDP, Payload: pkt, Fields: fields})
+		case <-idle.C:
+			return
+		}
 	}
 }

@@ -109,6 +109,21 @@ func splitList(v string) []string {
 	return out
 }
 
+// startUserspace brings up one WireGuard device on an in-memory TUN.
+func startUserspace(ipc string) (*device.Device, *chanTUN, error) {
+	tunDev := newChanTUN()
+	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, "sideband-wg "))
+	if err := dev.IpcSet(ipc); err != nil {
+		dev.Close()
+		return nil, nil, err
+	}
+	if err := dev.Up(); err != nil {
+		dev.Close()
+		return nil, nil, err
+	}
+	return dev, tunDev, nil
+}
+
 // ServeWireGuard runs two userspace tunnels and copies decrypted IP packets
 // from one to the other. Each copied packet is logged with its IP header.
 func (s *Server) ServeWireGuard(cfg *WireGuardConfig) error {
@@ -186,12 +201,23 @@ func wireguardFields(pkt []byte) map[string]any {
 		if len(pkt) >= 8 {
 			fields["receiver"] = binaryUint32(pkt[4:8])
 		}
+		if len(pkt) >= 16 {
+			fields["counter"] = binaryUint64(pkt[8:16])
+		}
 	}
 	return fields
 }
 
 func binaryUint32(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+
+func binaryUint64(b []byte) uint64 {
+	var n uint64
+	for i := 0; i < 8; i++ {
+		n |= uint64(b[i]) << (8 * i)
+	}
+	return n
 }
 
 func ipFields(pkt []byte) map[string]any {

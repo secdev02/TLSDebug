@@ -145,18 +145,26 @@ type quicLogConn struct {
 }
 
 func (c *quicLogConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	n, addr, err := c.PacketConn.ReadFrom(p)
-	if n > 0 && c.srv.Log != nil {
-		_ = c.srv.Log.Write(Record{
-			FlowID:    0,
-			Direction: DirClientToProxy,
-			Layer:     LayerWire,
-			Proto:     ProtoQUIC,
-			Payload:   append([]byte(nil), p[:n]...),
-			Fields:    quicHeaderFields(p[:n]),
-		})
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(p)
+		if n > 0 {
+			fields := quicHeaderFields(p[:n])
+			if c.srv.Log != nil {
+				_ = c.srv.Log.Write(Record{
+					FlowID:    0,
+					Direction: DirClientToProxy,
+					Layer:     LayerWire,
+					Proto:     ProtoQUIC,
+					Payload:   append([]byte(nil), p[:n]...),
+					Fields:    fields,
+				})
+			}
+			if supported, ok := fields["supported"].(bool); ok && !supported {
+				continue
+			}
+		}
+		return n, addr, err
 	}
-	return n, addr, err
 }
 
 func (c *quicLogConn) WriteTo(p []byte, addr net.Addr) (int, error) {
@@ -181,11 +189,25 @@ func quicHeaderFields(pkt []byte) map[string]any {
 	if pkt[0]&0x80 != 0 {
 		fields["header"] = "long"
 		if len(pkt) >= 5 {
-			fields["version"] = binary.BigEndian.Uint32(pkt[1:5])
+			version := binary.BigEndian.Uint32(pkt[1:5])
+			fields["version"] = version
+			// Version 0 is a version negotiation packet. v1 and v2 are the ones we terminate.
+			fields["supported"] = version == 0 || version == 0x00000001 || version == 0x6b3343cf
+		}
+		if len(pkt) >= 6 {
+			dcil := int(pkt[5])
+			if dcil <= 20 && len(pkt) >= 6+dcil+1 {
+				fields["dcid"] = pkt[6 : 6+dcil]
+				scil := int(pkt[6+dcil])
+				if scil <= 20 && len(pkt) >= 7+dcil+scil {
+					fields["scid"] = pkt[7+dcil : 7+dcil+scil]
+				}
+			}
 		}
 		return fields
 	}
 	fields["header"] = "short"
+	fields["supported"] = true
 	return fields
 }
 

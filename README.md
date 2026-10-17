@@ -205,8 +205,8 @@ requests.get('https://api.example.com', proxies=proxies, verify='proxy-ca.crt')
 Sideband is the code name for interception that is not HTTP. It is off until one of the `-sideband-*` listen flags is set. Each listener dials `-sideband-upstream` and terminates the session:
 
 - TCP: a TLS ClientHello is intercepted with this proxy's CA. A cleartext greeting (`220` SMTP or FTP, `* OK` IMAP, `+OK` POP3, XMPP) is relayed until STARTTLS, then upgraded. An 8-byte Postgres `SSLRequest` is upgraded the same way. Anything else is a raw TCP proxy.
-- UDP: each client address is its own flow.
-- DTLS and QUIC: terminated with the same CA and opened again toward the origin. QUIC rejects 0-RTT. QUIC streams and datagrams are relayed after decryption.
+- UDP: each client address is its own flow. A flow expires after two minutes with no datagrams.
+- DTLS and QUIC: terminated with the same CA and opened again toward the origin. QUIC rejects 0-RTT. A long-header packet whose version is not 1 or 2 is logged and not forwarded. QUIC streams and datagrams are relayed after decryption.
 - WireGuard has no CA. `-sideband-wg` points at an ini file with `[client]` and `[origin]` keys. The client peers with the client-facing key, and the real peer accepts the origin-facing key. Decrypted inner IP packets are copied between the two tunnels.
 
 ```ini

@@ -34,12 +34,14 @@ type CertIssuer interface {
 	Certificate(host string) (*tls.Certificate, error)
 }
 
-// Module owns one intercepted flow. Detect looks at the first bytes.
-// Intercept terminates the client, dials the origin, and copies until EOF.
+// Module is one Sideband protocol. Detect looks at the first bytes.
+// Handshake terminates the client and dials the origin. Forward carries one
+// decrypted record, stream chunk, or datagram toward the other side.
 type Module interface {
 	Name() string
 	Detect(prelude []byte, meta FlowMeta) bool
-	Intercept(flow *Flow, client net.Conn) error
+	Handshake(flow *Flow) error
+	Forward(flow *Flow, pkt Packet) error
 }
 
 // Flow is one client session and the log records that belong to it.
@@ -50,6 +52,9 @@ type Flow struct {
 	upstream    string
 	certs       CertIssuer
 	originRoots *x509.CertPool
+	client      net.Conn
+	origin      net.Conn
+	prelude     []byte
 }
 
 func (f *Flow) ID() uint32 { return f.id }

@@ -107,6 +107,8 @@ func isUpgradeCommand(kind string, line []byte) bool {
 		return len(fields) >= 2 && fields[len(fields)-1] == "STARTTLS"
 	case "xmpp":
 		return strings.Contains(s, "STARTTLS")
+	case "ldap":
+		return ldapStartTLS(line)
 	default:
 		return false
 	}

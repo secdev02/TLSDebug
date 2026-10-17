@@ -32,15 +32,28 @@ func splice(flow *Flow, proto Proto, left, right net.Conn) error {
 
 func copyLog(flow *Flow, proto Proto, readDir, writeDir Direction, src, dst net.Conn) error {
 	buf := make([]byte, 32*1024)
+	var offset uint64
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
 			chunk := append([]byte(nil), buf[:n]...)
-			flow.Log(readDir, LayerPlain, proto, chunk, nil)
+			fields := map[string]any{
+				"len":      n,
+				"offset":   offset,
+				"client":   flow.meta.Client,
+				"upstream": flow.upstream,
+			}
+			offset += uint64(n)
+			pkt := Packet{Direction: readDir, Layer: LayerPlain, Proto: proto, Payload: chunk, Fields: fields}
+			if ferr := (tcpModule{}).Forward(flow, pkt); ferr != nil && dst == nil {
+				return ferr
+			}
 			if _, werr := dst.Write(chunk); werr != nil {
 				return werr
 			}
-			flow.Log(writeDir, LayerPlain, proto, chunk, nil)
+			out := pkt
+			out.Direction = writeDir
+			_ = (tcpModule{}).Forward(flow, out)
 		}
 		if err != nil {
 			return err

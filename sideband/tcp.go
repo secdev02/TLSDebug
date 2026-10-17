@@ -109,7 +109,7 @@ type teeConn struct {
 func (c *teeConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 {
-		c.flow.Log(DirClientToProxy, LayerWire, c.proto, p[:n], nil)
+		c.flow.Log(DirClientToProxy, LayerWire, c.proto, p[:n], tlsRecordFields(p[:n]))
 	}
 	return n, err
 }
@@ -117,7 +117,7 @@ func (c *teeConn) Read(p []byte) (int, error) {
 func (c *teeConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	if n > 0 {
-		c.flow.Log(DirProxyToClient, LayerWire, c.proto, p[:n], nil)
+		c.flow.Log(DirProxyToClient, LayerWire, c.proto, p[:n], tlsRecordFields(p[:n]))
 	}
 	return n, err
 }

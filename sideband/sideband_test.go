@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/pion/dtls/v3"
 	"github.com/quic-go/quic-go"
+	"golang.org/x/crypto/curve25519"
 )
 
 func TestLoggerRoundTrip(t *testing.T) {
@@ -106,9 +108,43 @@ func TestClassify(t *testing.T) {
 	if fields["header"] != "long" || fields["version"] != uint32(1) {
 		t.Fatalf("quic fields = %v", fields)
 	}
-	wg := wireguardFields([]byte{4, 0, 0, 0, 1, 0, 0, 0})
-	if wg["message"] != "transport" || wg["receiver"] != uint32(1) {
+	wg := wireguardFields([]byte{4, 0, 0, 0, 1, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0})
+	if wg["message"] != "transport" || wg["receiver"] != uint32(1) || wg["counter"] != uint64(9) {
 		t.Fatalf("wg fields = %v", wg)
+	}
+	for _, typ := range []byte{1, 2, 3, 4} {
+		f := wireguardFields([]byte{typ, 0, 0, 0})
+		if f["type"] != typ {
+			t.Fatalf("type %d = %v", typ, f)
+		}
+	}
+	tlsFields := tlsRecordFields([]byte{22, 3, 3, 0, 1, 1})
+	if tlsFields["content_type"] != byte(22) || tlsFields["handshake_type"] != byte(1) || tlsFields["version"] != uint16(0x0303) {
+		t.Fatalf("tls record = %v", tlsFields)
+	}
+	dtlsFields := dtlsRecordFields([]byte{22, 0xfe, 0xfd, 0, 1, 0, 0, 0, 0, 0, 7, 0, 1, 1})
+	if dtlsFields["epoch"] != uint16(1) || dtlsFields["sequence"] != uint64(7) || dtlsFields["handshake_type"] != byte(1) {
+		t.Fatalf("dtls record = %v", dtlsFields)
+	}
+	if !quicHeaderFields([]byte{0xc0, 0x6b, 0x33, 0x43, 0xcf})["supported"].(bool) {
+		t.Fatal("quic v2 should be supported")
+	}
+	if quicHeaderFields([]byte{0xc0, 0, 0, 0, 0x99})["supported"].(bool) {
+		t.Fatal("unknown quic version was supported")
+	}
+	if !ldapStartTLS([]byte("oid 1.3.6.1.4.1.1466.20037")) {
+		t.Fatal("ldap oid")
+	}
+	meta := FlowMeta{Network: "tcp"}
+	if !(tlsModule{}).Detect([]byte{22, 3, 1}, meta) || (tlsModule{}).Name() != "tls" {
+		t.Fatal("tls module")
+	}
+	if !(tcpModule{}).Detect([]byte("GET"), meta) {
+		t.Fatal("tcp module")
+	}
+	flow := &Flow{id: 1, meta: meta, upstream: "example:1"}
+	if err := (tcpModule{}).Forward(flow, Packet{Direction: DirClientToProxy, Layer: LayerPlain, Proto: ProtoTCP, Payload: []byte("a")}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -224,6 +260,92 @@ func TestQUICEcho(t *testing.T) {
 	if string(buf) != "quic" {
 		t.Fatalf("echo = %q", buf)
 	}
+}
+
+func TestWireGuardLoopback(t *testing.T) {
+	proxyPort := freeUDPPort(t)
+	serverPort := freeUDPPort(t)
+	userPriv, userPub := wgPair(t)
+	proxyCPriv, proxyCPub := wgPair(t)
+	proxyOPriv, proxyOPub := wgPair(t)
+	srvPriv, srvPub := wgPair(t)
+
+	srvDev, srvTUN, err := startUserspace(wgIPC(srvPriv, serverPort, proxyOPub, "", []string{"0.0.0.0/0"}) + "persistent_keepalive_interval=1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srvDev.Close()
+	proxyClient, proxyClientTUN, err := startUserspace(wgIPC(proxyCPriv, proxyPort, userPub, "", []string{"0.0.0.0/0"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxyClient.Close()
+	proxyOrigin, proxyOriginTUN, err := startUserspace(wgIPC(proxyOPriv, 0, srvPub, fmt.Sprintf("127.0.0.1:%d", serverPort), []string{"0.0.0.0/0"}) + "persistent_keepalive_interval=1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxyOrigin.Close()
+	userDev, userTUN, err := startUserspace(wgIPC(userPriv, 0, proxyCPub, fmt.Sprintf("127.0.0.1:%d", proxyPort), []string{"0.0.0.0/0"}) + "persistent_keepalive_interval=1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer userDev.Close()
+
+	dir := t.TempDir()
+	logw, err := OpenLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logw.Close()
+	flow := &Flow{id: 1, log: logw, meta: FlowMeta{Client: "wireguard", Upstream: fmt.Sprintf("127.0.0.1:%d", serverPort)}, upstream: fmt.Sprintf("127.0.0.1:%d", serverPort)}
+	go bridgeTUN(flow, DirClientToProxy, proxyClientTUN, proxyOriginTUN)
+	go bridgeTUN(flow, DirOriginToProxy, proxyOriginTUN, proxyClientTUN)
+	time.Sleep(300 * time.Millisecond)
+
+	pkt := make([]byte, 20)
+	pkt[0] = 0x45
+	pkt[2] = 0
+	pkt[3] = 20
+	pkt[9] = 17
+	copy(pkt[12:16], []byte{10, 0, 0, 1})
+	copy(pkt[16:20], []byte{10, 0, 0, 2})
+	userTUN.toDev <- pkt
+
+	select {
+	case got := <-srvTUN.fromDev:
+		if len(got) < 20 || got[0]>>4 != 4 {
+			t.Fatalf("inner packet = %x", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("wireguard packet did not cross the proxy")
+	}
+}
+
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := pc.LocalAddr().(*net.UDPAddr).Port
+	pc.Close()
+	return port
+}
+
+func wgPair(t *testing.T) (privB64, pubB64 string) {
+	t.Helper()
+	priv := make([]byte, 32)
+	if _, err := rand.Read(priv); err != nil {
+		t.Fatal(err)
+	}
+	priv[0] &= 248
+	priv[31] &= 127
+	priv[31] |= 64
+	pub, err := curve25519.X25519(priv, curve25519.Basepoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(priv), base64.StdEncoding.EncodeToString(pub)
 }
 
 func TestTCPEcho(t *testing.T) {
