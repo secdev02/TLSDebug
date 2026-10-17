@@ -50,7 +50,8 @@ func interceptSTARTTLS(flow *Flow, client, origin net.Conn, kind string) error {
 }
 
 func upgradeTLS(flow *Flow, client, origin net.Conn) error {
-	cfg, err := tlsServerConfig(flow)
+	serverKeys := flow.log.newCapture()
+	cfg, err := tlsServerConfig(flow, serverKeys)
 	if err != nil {
 		return err
 	}
@@ -59,11 +60,14 @@ func upgradeTLS(flow *Flow, client, origin net.Conn) error {
 		return err
 	}
 	defer clientTLS.Close()
-	originTLS := tls.Client(&teeConn{Conn: origin, flow: flow, proto: ProtoSTARTTLS}, tlsClientConfig(flow))
+	logTLSState(flow, DirClientToProxy, clientTLS.ConnectionState(), leafFromConfig(cfg), serverKeys.Take())
+	originKeys := flow.log.newCapture()
+	originTLS := tls.Client(&teeConn{Conn: origin, flow: flow, proto: ProtoSTARTTLS}, tlsClientConfig(flow, originKeys))
 	if err := originTLS.Handshake(); err != nil {
 		return err
 	}
 	defer originTLS.Close()
+	logTLSState(flow, DirProxyToOrigin, originTLS.ConnectionState(), flow.clientCert, originKeys.Take())
 	return splice(flow, ProtoSTARTTLS, clientTLS, originTLS)
 }
 

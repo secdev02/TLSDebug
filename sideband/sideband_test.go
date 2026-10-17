@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -195,6 +196,13 @@ func TestDTLSEcho(t *testing.T) {
 	if string(buf) != "dtls" {
 		t.Fatalf("echo = %q", buf)
 	}
+	if !strings.Contains(keysText(t, dir), "BEGIN PRIVATE KEY") && !hasSecretLine(keysText(t, dir)) {
+		t.Fatal("dtls key log missing key material")
+	}
+	dtlsFields := dtlsRecordFields([]byte{22, 0xfe, 0xfd, 0, 1, 0, 0, 0, 0, 0, 7, 0, 1, 1})
+	if dtlsFields["epoch"] != uint16(1) || dtlsFields["sequence"] != uint64(7) {
+		t.Fatalf("dtls wire header = %v", dtlsFields)
+	}
 }
 
 func TestQUICEcho(t *testing.T) {
@@ -260,6 +268,21 @@ func TestQUICEcho(t *testing.T) {
 	if string(buf) != "quic" {
 		t.Fatalf("echo = %q", buf)
 	}
+	foundQUIC := false
+	for _, rec := range readRecords(t, dir) {
+		if rec.Proto != "quic" {
+			continue
+		}
+		if rec.Fields["header"] != nil && rec.Fields["supported"] == true {
+			foundQUIC = true
+		}
+	}
+	if !foundQUIC {
+		t.Fatal("quic log missing header or supported version")
+	}
+	if keysText(t, dir) == "" {
+		t.Fatal("quic key log is empty")
+	}
 }
 
 func TestWireGuardLoopback(t *testing.T) {
@@ -310,11 +333,25 @@ func TestWireGuardLoopback(t *testing.T) {
 	copy(pkt[12:16], []byte{10, 0, 0, 1})
 	copy(pkt[16:20], []byte{10, 0, 0, 2})
 	userTUN.toDev <- pkt
+	writeWGKeys(logw, flow, &WireGuardConfig{ClientPrivate: userPriv, OriginPrivate: proxyOPriv})
 
 	select {
 	case got := <-srvTUN.fromDev:
 		if len(got) < 20 || got[0]>>4 != 4 {
 			t.Fatalf("inner packet = %x", got)
+		}
+		foundIP := false
+		for _, rec := range readRecords(t, dir) {
+			if rec.Fields["ip"] == float64(4) && rec.Fields["src"] == "10.0.0.1" && rec.Fields["dst"] == "10.0.0.2" {
+				foundIP = true
+			}
+		}
+		if !foundIP {
+			t.Fatal("wireguard json missing inner addresses")
+		}
+		keys := keysText(t, dir)
+		if !strings.Contains(keys, userPriv) || !strings.Contains(keys, proxyOPriv) {
+			t.Fatal("wireguard key log missing private keys")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("wireguard packet did not cross the proxy")
@@ -375,6 +412,10 @@ func TestTCPEcho(t *testing.T) {
 	if string(buf) != "ping" {
 		t.Fatalf("echo = %q", buf)
 	}
+	rec := findRecord(readRecords(t, dir), "tcp", []byte("ping"), dir, t)
+	if rec.Fields["len"] == nil || rec.Fields["offset"] == nil {
+		t.Fatalf("tcp fields = %v", rec.Fields)
+	}
 }
 
 func TestUDPEcho(t *testing.T) {
@@ -404,6 +445,10 @@ func TestUDPEcho(t *testing.T) {
 	}
 	if string(buf[:n]) != "pong" {
 		t.Fatalf("echo = %q", buf[:n])
+	}
+	rec := findRecord(readRecords(t, dir), "udp", []byte("pong"), dir, t)
+	if rec.Fields["len"] == nil || rec.Fields["client"] == nil {
+		t.Fatalf("udp fields = %v", rec.Fields)
 	}
 }
 
@@ -447,6 +492,19 @@ func TestTLSEcho(t *testing.T) {
 	}
 	if string(buf) != "tls!" {
 		t.Fatalf("echo = %q", buf)
+	}
+	recs := readRecords(t, dir)
+	found := false
+	for _, rec := range recs {
+		if rec.Fields["server_name"] == "127.0.0.1" && rec.Fields["cipher"] != nil && strings.Contains(stringField(rec.Fields["leaf_private_pem"]), "BEGIN PRIVATE KEY") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("tls handshake log missing server name, cipher, or leaf key")
+	}
+	if !hasSecretLine(keysText(t, dir)) {
+		t.Fatal("tls key log missing a session secret")
 	}
 }
 
@@ -530,6 +588,18 @@ func TestSTARTTLS(t *testing.T) {
 	}
 	if string(buf) != "mail" {
 		t.Fatalf("echo = %q", buf)
+	}
+	found := false
+	for _, rec := range readRecords(t, dir) {
+		if rec.Fields["server_name"] == "127.0.0.1" && rec.Fields["cipher"] != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("starttls handshake was not logged")
+	}
+	if !strings.Contains(keysText(t, dir), "BEGIN PRIVATE KEY") {
+		t.Fatal("starttls key log missing leaf private key")
 	}
 }
 
@@ -627,9 +697,11 @@ func leaf(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, name stri
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		DNSNames:     []string{name},
-		IPAddresses:  []net.IP{net.ParseIP(name)},
+	}
+	if ip := net.ParseIP(name); ip != nil {
+		tmpl.IPAddresses = []net.IP{ip}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
 	if err != nil {

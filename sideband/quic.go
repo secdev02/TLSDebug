@@ -40,10 +40,16 @@ func (s *Server) ServeQUIC(listen string) error {
 			if len(protos) == 0 {
 				protos = []string{"sideband"}
 			}
+			auth := tls.RequestClientCert
+			if s.MTLSRequire {
+				auth = tls.RequireAnyClientCert
+			}
 			return &tls.Config{
 				Certificates: []tls.Certificate{*cert},
 				MinVersion:   tls.VersionTLS13,
 				NextProtos:   protos,
+				ClientAuth:   auth,
+				KeyLogWriter: secretDest{s.Log},
 			}, nil
 		},
 	}
@@ -79,16 +85,26 @@ func (s *Server) handleQUIC(ctx context.Context, client *quic.Conn) {
 	if alpn == "" {
 		alpn = "sideband"
 	}
+	originKeys := flow.log.newCapture()
+	originTLS := &tls.Config{
+		ServerName:   serverName(s.Upstream),
+		MinVersion:   tls.VersionTLS13,
+		NextProtos:   []string{alpn},
+		RootCAs:      s.OriginRoots,
+		KeyLogWriter: originKeys,
+	}
+	if flow.clientCert != nil {
+		originTLS.Certificates = []tls.Certificate{*flow.clientCert}
+	}
 	flow.Log(DirClientToProxy, LayerPlain, ProtoQUIC, nil, map[string]any{
-		"alpn":    alpn,
-		"version": uint32(state.Version),
+		"alpn":        alpn,
+		"version":     uint32(state.Version),
+		"header":      "handshake",
+		"supported":   true,
+		"peer_certs":  peerCertFields(state.TLS.PeerCertificates),
+		"server_name": state.TLS.ServerName,
 	})
-	origin, err := quic.DialAddr(ctx, s.Upstream, &tls.Config{
-		ServerName: serverName(s.Upstream),
-		MinVersion: tls.VersionTLS13,
-		NextProtos: []string{alpn},
-		RootCAs:    s.OriginRoots,
-	}, &quic.Config{Allow0RTT: false, EnableDatagrams: true})
+	origin, err := quic.DialAddr(ctx, s.Upstream, originTLS, &quic.Config{Allow0RTT: false, EnableDatagrams: true})
 	if err != nil {
 		flow.Log(DirProxyToOrigin, LayerWire, ProtoQUIC, nil, map[string]any{"error": err.Error()})
 		_ = client.CloseWithError(0, err.Error())
@@ -96,6 +112,15 @@ func (s *Server) handleQUIC(ctx context.Context, client *quic.Conn) {
 	}
 	defer origin.CloseWithError(0, "sideband done")
 	defer client.CloseWithError(0, "sideband done")
+	flow.Log(DirProxyToOrigin, LayerPlain, ProtoQUIC, nil, map[string]any{
+		"handshake":        "complete",
+		"keylog":           originKeys.Take(),
+		"peer_certs":       peerCertFields(origin.ConnectionState().TLS.PeerCertificates),
+		"leaf_private_pem": privatePEM(privateKeyOf(flow.clientCert)),
+		"header":           "handshake",
+		"supported":        true,
+		"version":          uint32(origin.ConnectionState().Version),
+	})
 
 	go relayDatagrams(flow, client, origin)
 	for {

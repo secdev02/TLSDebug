@@ -118,10 +118,11 @@ type jsonRecord struct {
 // JSON names the bytes by offset and length. Payloads up to 4 KiB are also
 // inlined so a reader can see a small record without opening the binary file.
 type Logger struct {
-	mu  sync.Mutex
-	bin *os.File
-	js  *os.File
-	off int64
+	mu   sync.Mutex
+	bin  *os.File
+	js   *os.File
+	keys *os.File
+	off  int64
 }
 
 // OpenLogger creates or appends the two logs in dir.
@@ -160,13 +161,26 @@ func OpenLogger(dir string) (*Logger, error) {
 		bin.Close()
 		return nil, err
 	}
-	off, err := bin.Seek(0, 2)
+	keys, err := os.OpenFile(dir+"/sideband.keys", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		js.Close()
 		bin.Close()
 		return nil, err
 	}
-	return &Logger{bin: bin, js: js, off: off}, nil
+	if err := keys.Chmod(0600); err != nil {
+		keys.Close()
+		js.Close()
+		bin.Close()
+		return nil, err
+	}
+	off, err := bin.Seek(0, 2)
+	if err != nil {
+		keys.Close()
+		js.Close()
+		bin.Close()
+		return nil, err
+	}
+	return &Logger{bin: bin, js: js, keys: keys, off: off}, nil
 }
 
 // Write stores one record. A copy of the payload is taken so the caller can reuse the buffer.
@@ -230,10 +244,35 @@ func (l *Logger) Close() error {
 	defer l.mu.Unlock()
 	err1 := l.bin.Close()
 	err2 := l.js.Close()
+	var err3 error
+	if l.keys != nil {
+		err3 = l.keys.Close()
+	}
 	if err1 != nil {
 		return err1
 	}
-	return err2
+	if err2 != nil {
+		return err2
+	}
+	return err3
+}
+
+func stringsHasNewline(s string) bool {
+	return len(s) > 0 && s[len(s)-1] == '\n'
+}
+
+// WriteSecrets appends private keys and NSS lines to sideband.keys.
+func (l *Logger) WriteSecrets(text string) error {
+	if l == nil || l.keys == nil || text == "" {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !stringsHasNewline(text) {
+		text += "\n"
+	}
+	_, err := l.keys.WriteString(text)
+	return err
 }
 
 // ReadPayload returns the bytes named by a JSON record. Used by tests and readers.

@@ -198,6 +198,9 @@ requests.get('https://api.example.com', proxies=proxies, verify='proxy-ca.crt')
 -sideband-quic string     Sideband QUIC listen address
 -sideband-upstream string Origin host:port for the Sideband listeners
 -sideband-wg string       WireGuard ini for the Sideband dual tunnel
+-sideband-mtls-require  Require a client certificate on Sideband TLS, DTLS, and QUIC
+-sideband-client-cert   Certificate presented to the Sideband origin
+-sideband-client-key    Private key presented to the Sideband origin
 ```
 
 ## Sideband
@@ -225,6 +228,9 @@ Every packet is written twice, in `-certdir`, mode `0600`:
 
 - `packets.bin` is the binary log. The file starts with `SBND` and a version. Each record is a timestamp, flow id, direction, layer (`wire` or `plaintext`), protocol, length, and the bytes.
 - `packets.jsonl` is one JSON object per record: the same metadata, parsed header fields, and `bin_offset` / `bin_length` into `packets.bin`. Payloads of 4 KiB or less are also inlined as `payload_b64`.
+- `sideband.keys` holds NSS session secrets (`CLIENT_HANDSHAKE_TRAFFIC_SECRET`, `SERVER_TRAFFIC_SECRET_0`, `CLIENT_RANDOM`), the proxy leaf private key, any client certificate the peer presented, and the WireGuard private keys for the two tunnels. TLS does not reveal the remote peer's private key. This file is mode `0600` and is only for debugging sessions you are allowed to intercept.
+
+Sideband requests a client certificate on TLS, DTLS, and QUIC. The chain is recorded and the handshake continues if the client does not send one. `-sideband-mtls-require` rejects that handshake. `-sideband-client-cert` and `-sideband-client-key` are the identity presented to the origin; the origin sees that pair, not the end user's private key. STARTTLS uses the same TLS settings after the upgrade.
 
 ```bash
 ./tlsproxy -skip-install \
@@ -440,7 +446,7 @@ openssl x509 -in proxy-ca.crt -text -noout
 - Remove CA certificate when done testing
 - Never use in production environments
 - The monitor (port 4040 by default) has no authentication and listens on all interfaces, because `/install-ca` is how a remote client downloads the CA. Anyone who can reach that port can read captured traffic and download the CA certificate. Do not expose it beyond a network you control.
-- Sideband is the same kind of interception for non-HTTP protocols. `packets.bin`, `packets.jsonl`, and the WireGuard ini contain traffic and keys. Keep them local.
+- Sideband is the same kind of interception for non-HTTP protocols. `packets.bin`, `packets.jsonl`, `sideband.keys`, and the WireGuard ini contain traffic, session secrets, and private keys. Keep them local.
 
 ## Build for Other Platforms
 
@@ -491,6 +497,7 @@ Runtime:
 - `EditThisCookie_Sessions.json` - Cookie import file (mode `0600`, in `-certdir`)
 - `packets.bin` - Sideband binary packet log (mode `0600`, in `-certdir`)
 - `packets.jsonl` - Sideband JSON packet log (mode `0600`, in `-certdir`)
+- `sideband.keys` - Sideband session secrets and proxy-held private keys (mode `0600`, in `-certdir`)
 - `MODULES.md` - Module development guide
 
 ## License

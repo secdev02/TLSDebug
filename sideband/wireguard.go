@@ -145,9 +145,24 @@ func (s *Server) ServeWireGuard(cfg *WireGuardConfig) error {
 		return err
 	}
 	flow := s.newFlow("udp", fmt.Sprintf("wireguard:%d", cfg.ClientListen))
+	writeWGKeys(s.Log, flow, cfg)
 	go bridgeTUN(flow, DirClientToProxy, clientTUN, originTUN)
 	go bridgeTUN(flow, DirOriginToProxy, originTUN, clientTUN)
 	select {}
+}
+
+func writeWGKeys(log *Logger, flow *Flow, cfg *WireGuardConfig) {
+	if cfg == nil {
+		return
+	}
+	text := "WIREGUARD_CLIENT_PRIVATE " + cfg.ClientPrivate + "\nWIREGUARD_ORIGIN_PRIVATE " + cfg.OriginPrivate + "\n"
+	_ = log.WriteSecrets(text)
+	if flow != nil {
+		flow.Log(DirClientToProxy, LayerPlain, ProtoWireGuard, nil, map[string]any{
+			"client_private_key": cfg.ClientPrivate,
+			"origin_private_key": cfg.OriginPrivate,
+		})
+	}
 }
 
 func bridgeTUN(flow *Flow, dir Direction, src, dst *chanTUN) {

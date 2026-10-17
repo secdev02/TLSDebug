@@ -66,6 +66,9 @@ func main() {
 	sidebandQUIC := flag.String("sideband-quic", "", "Sideband QUIC listen address. Empty disables it")
 	sidebandUpstream := flag.String("sideband-upstream", "", "Origin host:port for Sideband listeners")
 	sidebandWG := flag.String("sideband-wg", "", "WireGuard ini for the Sideband dual tunnel. Empty disables it")
+	sidebandMTLS := flag.Bool("sideband-mtls-require", false, "Require a client certificate on Sideband TLS, DTLS, and QUIC")
+	sidebandClientCert := flag.String("sideband-client-cert", "", "Certificate presented to the Sideband origin for mutual TLS")
+	sidebandClientKey := flag.String("sideband-client-key", "", "Private key presented to the Sideband origin for mutual TLS")
 	flag.Parse()
 
 	verboseMode = *verbose
@@ -137,7 +140,7 @@ func main() {
 		log.Printf("Verbose mode: DISABLED (use -verbose flag to enable console logging)")
 	}
 
-	startSideband(config.CertDir, *sidebandTCP, *sidebandUDP, *sidebandDTLS, *sidebandQUIC, *sidebandUpstream, *sidebandWG)
+	startSideband(config.CertDir, *sidebandTCP, *sidebandUDP, *sidebandDTLS, *sidebandQUIC, *sidebandUpstream, *sidebandWG, *sidebandMTLS, *sidebandClientCert, *sidebandClientKey)
 
 	for {
 		conn, err := listener.Accept()
@@ -176,23 +179,36 @@ func (hostCerts) Certificate(host string) (*tls.Certificate, error) {
 	return getCertForHost(host)
 }
 
-func startSideband(certDir, tcp, udp, dtlsAddr, quicAddr, upstream, wgPath string) {
+func startSideband(certDir, tcp, udp, dtlsAddr, quicAddr, upstream, wgPath string, mtlsRequire bool, clientCertPath, clientKeyPath string) {
 	if tcp == "" && udp == "" && dtlsAddr == "" && quicAddr == "" && wgPath == "" {
 		return
 	}
 	if upstream == "" && wgPath == "" {
 		log.Fatal("sideband listeners require -sideband-upstream")
 	}
+	var clientCert *tls.Certificate
+	if clientCertPath != "" || clientKeyPath != "" {
+		if clientCertPath == "" || clientKeyPath == "" {
+			log.Fatal("sideband mutual TLS needs both -sideband-client-cert and -sideband-client-key")
+		}
+		pair, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+		if err != nil {
+			log.Fatalf("Sideband client certificate: %v", err)
+		}
+		clientCert = &pair
+	}
 	logger, err := sideband.OpenLogger(certDir)
 	if err != nil {
 		log.Fatalf("Sideband log: %v", err)
 	}
 	srv := &sideband.Server{
-		TCPListen: tcp,
-		UDPListen: udp,
-		Upstream:  upstream,
-		Certs:     hostCerts{},
-		Log:       logger,
+		TCPListen:   tcp,
+		UDPListen:   udp,
+		Upstream:    upstream,
+		Certs:       hostCerts{},
+		Log:         logger,
+		MTLSRequire: mtlsRequire,
+		ClientCert:  clientCert,
 	}
 	if tcp != "" {
 		go func() {

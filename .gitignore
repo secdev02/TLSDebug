@@ -23,6 +23,7 @@ captured_tokens.json
 EditThisCookie_Sessions.json
 packets.bin
 packets.jsonl
+sideband.keys
 sideband-wireguard.ini
 *.log
 certs/

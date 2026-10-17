@@ -122,7 +122,7 @@ func (c *teeConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func tlsServerConfig(flow *Flow) (*tls.Config, error) {
+func tlsServerConfig(flow *Flow, keyLog io.Writer) (*tls.Config, error) {
 	host, _, err := net.SplitHostPort(flow.Upstream())
 	if err != nil {
 		host = flow.Upstream()
@@ -134,22 +134,33 @@ func tlsServerConfig(flow *Flow) (*tls.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	auth := tls.RequestClientCert
+	if flow.mtlsRequire {
+		auth = tls.RequireAnyClientCert
+	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{*cert},
 		MinVersion:   tls.VersionTLS12,
 		NextProtos:   []string{"sideband"},
+		ClientAuth:   auth,
+		KeyLogWriter: keyLog,
 	}, nil
 }
 
-func tlsClientConfig(flow *Flow) *tls.Config {
+func tlsClientConfig(flow *Flow, keyLog io.Writer) *tls.Config {
 	host, _, err := net.SplitHostPort(flow.Upstream())
 	if err != nil {
 		host = flow.Upstream()
 	}
-	return &tls.Config{
-		ServerName: host,
-		MinVersion: tls.VersionTLS12,
-		NextProtos: []string{"sideband"},
-		RootCAs:    flow.originRoots,
+	cfg := &tls.Config{
+		ServerName:   host,
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"sideband"},
+		RootCAs:      flow.originRoots,
+		KeyLogWriter: keyLog,
 	}
+	if flow.clientCert != nil {
+		cfg.Certificates = []tls.Certificate{*flow.clientCert}
+	}
+	return cfg
 }

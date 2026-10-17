@@ -55,6 +55,8 @@ type Flow struct {
 	client      net.Conn
 	origin      net.Conn
 	prelude     []byte
+	mtlsRequire bool
+	clientCert  *tls.Certificate
 }
 
 func (f *Flow) ID() uint32 { return f.id }
@@ -91,6 +93,11 @@ type Server struct {
 	// OriginRoots, when set, is the trust store for the origin side.
 	// Nil uses the system roots.
 	OriginRoots *x509.CertPool
+	// MTLSRequire asks the client for a certificate and refuses the handshake
+	// when one is not presented.
+	MTLSRequire bool
+	// ClientCert is presented to the origin when mutual TLS is configured.
+	ClientCert *tls.Certificate
 	// WG, when set, starts the WireGuard dual tunnel.
 	WG *WireGuardConfig
 
@@ -135,6 +142,8 @@ func (s *Server) newFlow(network, client string) *Flow {
 		upstream:    s.Upstream,
 		certs:       s.Certs,
 		originRoots: s.OriginRoots,
+		mtlsRequire: s.MTLSRequire,
+		clientCert:  s.ClientCert,
 	}
 }
 
