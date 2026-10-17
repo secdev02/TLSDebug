@@ -21,6 +21,9 @@ proxy.log
 proxy-config.ini
 captured_tokens.json
 EditThisCookie_Sessions.json
+packets.bin
+packets.jsonl
+sideband-wireguard.ini
 *.log
 certs/
 
